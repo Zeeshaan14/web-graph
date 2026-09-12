@@ -1,6 +1,11 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import requests
 
-from html_signals import extract_html_signals
+from evidence import extract_html_signals
 
 
 def inspect_html_signals(url: str):
@@ -22,17 +27,17 @@ def inspect_html_signals(url: str):
     print("URL:", response.url)
 
     print("\nSCRIPTS:")
-    if not signals["scripts"]:
+    if not signals["script_src"]:
         print("None")
     else:
-        for script in signals["scripts"]:
+        for script in signals["script_src"]:
             print(" -", script)
 
     print("\nSTYLESHEETS:")
-    if not signals["stylesheets"]:
+    if not signals["stylesheet_href"]:
         print("None")
     else:
-        for stylesheet in signals["stylesheets"]:
+        for stylesheet in signals["stylesheet_href"]:
             print(" -", stylesheet)
 
     print("\nMETA TAGS:")

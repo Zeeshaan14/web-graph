@@ -6,7 +6,13 @@
 # scoring questions (should one strong rule be enough? should some rules be
 # mandatory? etc.) without needing a live site to change its headers.
 
-from engine import detect, make_context
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from engine import detect
+from evidence import build_evidence_from_parts
 from fingerprints import FINGERPRINTS
 
 TEST_CASES = [
@@ -137,7 +143,7 @@ TEST_CASES = [
 
 def run_matrix():
     for test in TEST_CASES:
-        context = make_context(test["headers"], test["html"], test.get("cookies"))
+        context = build_evidence_from_parts(test["headers"], test["html"], test.get("cookies"))
 
         results = detect(FINGERPRINTS, context)
         match = next((r for r in results if r["technology"] == test["technology"]), None)
@@ -185,7 +191,7 @@ NEXTJS_GROUP_CASES = [
 
 def run_nextjs_group_cases():
     for case in NEXTJS_GROUP_CASES:
-        context = make_context(case["headers"], case["html"])
+        context = build_evidence_from_parts(case["headers"], case["html"])
 
         results = detect(FINGERPRINTS, context)
         match = next((r for r in results if r["technology"] == "Next.js"), None)

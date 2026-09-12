@@ -1,37 +1,22 @@
-import requests
-
-from engine import build_context, detect
-from fingerprints import FINGERPRINTS
+from pipeline import detect_website_technologies
 
 
-def inspect_url(url: str):
-    try:
-        response = requests.get(url, timeout=10)
-    except requests.exceptions.RequestException as exc:
-        print("Request failed:", exc)
-        return
-
+def print_result(result):
     print("=" * 70)
-    print("Requested URL:", url)
-    print("Final URL:", response.url)
-    print("Status:", response.status_code)
+    print("URL:", result["url"])
+    print("Evidence source:", result["evidence_source"])
 
-    context = build_context(response)
-    technologies = detect(FINGERPRINTS, context)
-
-    print("\nDetected Technologies:")
-
-    if not technologies:
-        print("None detected")
+    if not result["technologies"]:
+        print("No technologies detected")
         return
 
-    for item in technologies:
+    for item in result["technologies"]:
         print(f"\n{item['technology']} ({item['category']})")
         print(f"  confidence: {item['confidence']} ({item['confidence_score']})")
 
-        for evidence in item["evidence"]:
-            print(f"  - {evidence}")
+        for line in item["evidence"]:
+            print(f"  - {line}")
 
 
-inspect_url("https://example.com")
-inspect_url("https://lakshx.in/")
+print_result(detect_website_technologies("https://example.com"))
+print_result(detect_website_technologies("https://lakshx.in/"))
