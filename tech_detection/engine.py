@@ -14,7 +14,7 @@
 # so a browser-enriched evidence dict is evaluated exactly the same way a
 # plain HTTP one is.
 
-from fingerprints import FINGERPRINTS
+from .fingerprints import FINGERPRINTS
 
 MIN_DETECTION_SCORE = 40
 
@@ -210,6 +210,7 @@ def detect(fingerprints, context):
                 "confidence_score": score,
                 "confidence": confidence_label(score),
                 "evidence": evidence,
+                "browser_enrichable": fingerprint.get("browser_enrichable", False),
             })
 
     return detected

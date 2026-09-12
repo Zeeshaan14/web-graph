@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import requests
 
-from evidence import extract_html_signals
+from tech_detection.evidence import extract_html_signals
 
 
 def inspect_html_signals(url: str):

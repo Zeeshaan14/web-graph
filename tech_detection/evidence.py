@@ -54,7 +54,7 @@ def extract_html_signals(html: str):
     }
 
 
-def build_evidence_from_parts(headers, html, cookies=None):
+def build_evidence_from_parts(headers, html, cookies=None, status_code=None):
     html_signals = extract_html_signals(html)
 
     return {
@@ -67,6 +67,7 @@ def build_evidence_from_parts(headers, html, cookies=None):
             for key, value in (cookies or {}).items()
         },
         "html": html.lower(),
+        "status_code": status_code,
         **html_signals,
     }
 
@@ -76,6 +77,7 @@ def build_evidence(response, session):
         headers=response.headers,
         html=response.text,
         cookies=session.cookies.get_dict(),
+        status_code=response.status_code,
     )
 
 
@@ -112,6 +114,7 @@ def merge_evidence(http_evidence, browser_evidence, base_url):
 
     return {
         "headers": http_evidence.get("headers", {}),
+        "status_code": http_evidence.get("status_code"),
         "html": browser_evidence.get("html") or http_evidence.get("html", ""),
         "cookies": {
             **http_evidence.get("cookies", {}),

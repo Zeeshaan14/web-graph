@@ -8,6 +8,15 @@
 #           | "all" (AND: satisfied only if every rule in the group matches)
 #   weight -> points added to the score when the group is satisfied
 #             (awarded once per group, not once per matching rule)
+#
+# Each fingerprint also has browser_enrichable: True if a Playwright pass
+# is actually likely to add NEW evidence for this technology (client-side
+# frameworks/trackers with javascript_globals rules, or evidence that
+# only shows up after hydration) — False for technologies whose evidence
+# is entirely server-side/static, where launching a browser is wasted
+# cost (nginx/Apache's Server header, WordPress's static HTML markers).
+# fallback.py uses this to avoid launching Chromium purely to re-confirm
+# a "possible" web-server guess it can never improve.
 #   rules  -> list of rules, in one of two shapes:
 #
 #     {source, key, operator, value} — single-field lookup
@@ -34,6 +43,7 @@ FINGERPRINTS = [
     {
         "technology": "Cloudflare",
         "category": "CDN / Security",
+        "browser_enrichable": False,
         "groups": [
             {
                 # Cloudflare-specific edge headers. Either one alone is
@@ -76,6 +86,7 @@ FINGERPRINTS = [
     {
         "technology": "Vercel",
         "category": "Hosting / Platform",
+        "browser_enrichable": False,
         "groups": [
             {
                 "logic": "any",
@@ -99,6 +110,7 @@ FINGERPRINTS = [
     {
         "technology": "Next.js",
         "category": "Web Framework",
+        "browser_enrichable": True,
         "groups": [
             {
                 # Next.js-specific response headers are hard to fake and
@@ -147,6 +159,7 @@ FINGERPRINTS = [
     {
         "technology": "WordPress",
         "category": "CMS",
+        "browser_enrichable": False,
         "groups": [
             # wp-content and wp-includes are independent markers (theme
             # assets vs core assets), not duplicates of the same signal,
@@ -210,6 +223,7 @@ FINGERPRINTS = [
     {
         "technology": "React",
         "category": "Frontend Framework",
+        "browser_enrichable": True,
         "groups": [
             {
                 # data-reactroot was React's own SSR hydration marker —
@@ -244,6 +258,7 @@ FINGERPRINTS = [
     {
         "technology": "Vue",
         "category": "Frontend Framework",
+        "browser_enrichable": True,
         "groups": [
             {
                 # data-v-xxxxxxxx is Vue's single-file-component scoped-CSS
@@ -270,6 +285,7 @@ FINGERPRINTS = [
     {
         "technology": "Angular",
         "category": "Frontend Framework",
+        "browser_enrichable": True,
         "groups": [
             {
                 # Angular writes ng-version="x.y.z" onto its root element in
@@ -289,6 +305,7 @@ FINGERPRINTS = [
     {
         "technology": "Shopify",
         "category": "Ecommerce Platform",
+        "browser_enrichable": True,
         "groups": [
             {
                 # Shopify storefronts serve theme JS/CSS from Shopify's own
@@ -327,6 +344,7 @@ FINGERPRINTS = [
     {
         "technology": "nginx",
         "category": "Web Server",
+        "browser_enrichable": False,
         "groups": [
             {
                 "logic": "any",
@@ -340,6 +358,7 @@ FINGERPRINTS = [
     {
         "technology": "Apache",
         "category": "Web Server",
+        "browser_enrichable": False,
         "groups": [
             {
                 "logic": "any",
@@ -360,6 +379,7 @@ FINGERPRINTS = [
     {
         "technology": "Google Tag Manager / Google Analytics",
         "category": "Analytics",
+        "browser_enrichable": True,
         "groups": [
             {
                 # The loader script (gtm.js / gtag.js / legacy analytics.js)
