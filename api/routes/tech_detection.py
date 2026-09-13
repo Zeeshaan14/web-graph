@@ -1,4 +1,4 @@
-# The entire job of this layer: validate the request (schemas.py /
+# The entire job of this layer: validate the request (schemas/ /
 # FastAPI does that), call the pipeline, return its result. No fetching,
 # no evidence building, no scoring, no fallback decisions -- all of that
 # stays in tech_detection.pipeline, exactly as it was before an API ever
@@ -9,7 +9,7 @@ from fastapi import APIRouter
 
 from tech_detection.pipeline import detect_website_technologies
 
-from .schemas import DetectRequest, DetectResponse
+from ..schemas.tech_detection import DetectRequest, DetectResponse
 
 router = APIRouter()
 
