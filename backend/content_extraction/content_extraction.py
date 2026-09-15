@@ -1,5 +1,12 @@
+import re
+
 import requests
 from bs4 import BeautifulSoup
+
+# A generous cap for an article/blog-post page, not a file download -- large
+# enough that no real page we've tested against comes close, small enough
+# that a mislinked video/archive/dump can't be pulled fully into memory.
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
 # Same fix as url_discovery/fetcher.py's BROWSER_HEADERS -- some sites (we
 # already saw this with realpython.com) reject requests that look like a
@@ -27,9 +34,35 @@ def _failed(url: str, error: str) -> dict:
     }
 
 
+def _decode_bounded(response: requests.Response, max_bytes: int) -> str | None:
+    """Reads the response body in chunks, stopping (and returning None) the
+    moment max_bytes is exceeded -- unlike a Content-Length header, this
+    catches a body that's simply larger than declared or served without one
+    at all. requests.Response.text isn't used here: it would already have
+    buffered the whole thing into memory before we got a chance to check."""
+    body = bytearray()
+
+    for chunk in response.iter_content(chunk_size=65536):
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            return None
+
+    charset_match = re.search(
+        r"charset=([\w-]+)", response.headers.get("content-type", ""), re.IGNORECASE
+    )
+    encoding = charset_match.group(1) if charset_match else "utf-8"
+
+    try:
+        return bytes(body).decode(encoding, errors="replace")
+    except LookupError:
+        # An unrecognized charset name (typo'd or made up) -- fall back
+        # rather than fail a page over a header we can't trust anyway.
+        return bytes(body).decode("utf-8", errors="replace")
+
+
 def extract_content(url: str):
     try:
-        response = requests.get(url, headers=BROWSER_HEADERS, timeout=10)
+        response = requests.get(url, headers=BROWSER_HEADERS, timeout=10, stream=True)
         response.raise_for_status()
 
         content_type = response.headers.get("content-type", "")
@@ -37,7 +70,23 @@ def extract_content(url: str):
         if "text/html" not in content_type.lower():
             return _failed(url, f"Response is not HTML: {content_type or 'unknown content type'}")
 
-        soup = BeautifulSoup(response.text, "html.parser")
+        content_length = response.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > MAX_RESPONSE_BYTES:
+                    return _failed(
+                        url,
+                        f"Response too large: {content_length} bytes exceeds "
+                        f"{MAX_RESPONSE_BYTES}-byte limit",
+                    )
+            except ValueError:
+                pass  # not a valid integer -- fall through to the real cap below
+
+        html = _decode_bounded(response, MAX_RESPONSE_BYTES)
+        if html is None:
+            return _failed(url, f"Response exceeded {MAX_RESPONSE_BYTES}-byte limit while downloading")
+
+        soup = BeautifulSoup(html, "html.parser")
 
         # aside alongside script/style/noscript/nav/footer -- sidebars,
         # related-post widgets, and similar boilerplate commonly live in

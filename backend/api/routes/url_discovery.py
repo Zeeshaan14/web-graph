@@ -14,9 +14,17 @@ router = APIRouter()
 
 @router.post("/discover-urls", response_model=DiscoverResponse)
 def discover_urls_route(request: DiscoverRequest) -> DiscoverResponse:
+    path_specific_strip = (
+        {path: set(params) for path, params in request.path_specific_strip.items()}
+        if request.path_specific_strip is not None
+        else None
+    )
+
     result = discover_urls(
         request.url,
         max_pages=request.max_pages,
         max_depth=request.max_depth,
+        path_specific_strip=path_specific_strip,
+        timeout_seconds=request.timeout_seconds,
     )
     return DiscoverResponse(**result)

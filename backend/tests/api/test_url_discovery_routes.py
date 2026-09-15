@@ -38,7 +38,13 @@ class TestDiscoverUrlsRoute:
                 json={"url": "https://example.com/", "max_pages": 20, "max_depth": 2},
             )
 
-        mock_discover.assert_called_once_with("https://example.com/", max_pages=20, max_depth=2)
+        mock_discover.assert_called_once_with(
+            "https://example.com/",
+            max_pages=20,
+            max_depth=2,
+            path_specific_strip=None,
+            timeout_seconds=60.0,
+        )
         assert response.status_code == 200
         assert response.json()["status"] == "success"
         assert response.json()["discovered_urls"] == SUCCESS_RESULT["discovered_urls"]
@@ -47,7 +53,13 @@ class TestDiscoverUrlsRoute:
         with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
             client.post("/discover-urls", json={"url": "https://example.com/"})
 
-        mock_discover.assert_called_once_with("https://example.com/", max_pages=10, max_depth=None)
+        mock_discover.assert_called_once_with(
+            "https://example.com/",
+            max_pages=10,
+            max_depth=None,
+            path_specific_strip=None,
+            timeout_seconds=60.0,
+        )
 
     def test_passes_through_a_partial_result_as_200_not_500(self):
         with patch("api.routes.url_discovery.discover_urls", return_value=PARTIAL_RESULT):
@@ -101,5 +113,76 @@ class TestDiscoverUrlsRoute:
         with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
             response = client.post("/discover-urls", json={"url": "https://example.com/", "max_depth": None})
 
-        mock_discover.assert_called_once_with("https://example.com/", max_pages=10, max_depth=None)
+        mock_discover.assert_called_once_with(
+            "https://example.com/",
+            max_pages=10,
+            max_depth=None,
+            path_specific_strip=None,
+            timeout_seconds=60.0,
+        )
         assert response.status_code == 200
+
+
+class TestTimeoutSecondsValidation:
+    def test_defaults_to_sixty_seconds(self):
+        with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
+            client.post("/discover-urls", json={"url": "https://example.com/"})
+
+        assert mock_discover.call_args.kwargs["timeout_seconds"] == 60.0
+
+    def test_custom_timeout_is_forwarded(self):
+        with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
+            client.post("/discover-urls", json={"url": "https://example.com/", "timeout_seconds": 30})
+
+        assert mock_discover.call_args.kwargs["timeout_seconds"] == 30.0
+
+    def test_above_the_cap_is_rejected(self):
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls", json={"url": "https://example.com/", "timeout_seconds": 301}
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422
+
+    def test_below_one_second_is_rejected(self):
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls", json={"url": "https://example.com/", "timeout_seconds": 0}
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422
+
+    def test_unbounded_null_is_rejected(self):
+        # Same reasoning as max_pages -- a public endpoint must not expose
+        # the library's own "no time limit" option.
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls", json={"url": "https://example.com/", "timeout_seconds": None}
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422
+
+
+class TestPathSpecificStripValidation:
+    def test_defaults_to_none(self):
+        with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
+            client.post("/discover-urls", json={"url": "https://example.com/"})
+
+        assert mock_discover.call_args.kwargs["path_specific_strip"] is None
+
+    def test_submitted_lists_are_converted_to_sets_before_reaching_discover_urls(self):
+        with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
+            client.post(
+                "/discover-urls",
+                json={
+                    "url": "https://example.com/",
+                    "path_specific_strip": {"/feedback/": ["d", "ref"]},
+                },
+            )
+
+        forwarded = mock_discover.call_args.kwargs["path_specific_strip"]
+        assert forwarded == {"/feedback/": {"d", "ref"}}
+        assert isinstance(forwarded["/feedback/"], set)

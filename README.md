@@ -156,9 +156,15 @@ of this feature:
 - Structured `success` / `partial` / `failed` outcomes — a handful of broken
   pages inside an otherwise-working crawl is `partial`, not `failed`; nothing
   ever raises a raw exception out of `discover_urls()`
-- `POST /discover-urls` — `max_pages` capped `1–100` at the API layer (the
-  library itself allows unbounded for direct callers; the public endpoint
-  does not), `max_depth` optional
+- A wall-clock timeout for the whole crawl (`timeout_seconds`), checked the
+  same way `max_pages` is — before starting the next page, never by
+  interrupting a fetch already in flight; `max_pages` alone bounds *how many*
+  pages get fetched, not how long a slow site takes doing it
+- `POST /discover-urls` — `max_pages` capped `1–100` and `timeout_seconds`
+  capped `1–300` at the API layer (the library itself allows both unbounded
+  for direct callers; the public endpoint does not), `max_depth` optional,
+  `path_specific_strip` accepted as `{path: [params]}` and converted to sets
+  before reaching `discover_urls()`
 
 ### What V1 does *not* promise yet
 
@@ -171,15 +177,10 @@ of this feature:
   not be discovered.
 - **No `robots.txt` or `sitemap.xml` awareness** — the crawler doesn't check
   either; it discovers purely by following on-page links.
-- **No `path_specific_strip` via the API** — the noisy-query-param override
-  exists in `discover_urls()`/`crawl()` for direct/CLI callers only; the
-  public `/discover-urls` endpoint has no field for it yet.
 - **Subdomains are treated as different domains** — scope is an exact
   hostname match against the start URL, so `www.site.com` and `site.com`
   (or any other subdomain) are never treated as the same site, even if a
   real visitor would consider them one.
-- **No wall-clock timeout** — bounded by page count and depth only; a slow
-  site can still take a long time within that budget.
 - **Synchronous only** — a crawl runs inline within one HTTP request; there's
   no background-job/poll pattern yet (see the API section below for why that
   matters for production).
@@ -205,6 +206,10 @@ field rather than a list.
 - Content-type check before parsing — a non-HTML response (confirmed against
   a real image URL) returns `"failed"` with a clear error instead of trying
   to soup-parse binary data
+- A response-size cap (5 MB) enforced while streaming, not just trusted from
+  a `Content-Length` header — a response that's larger than declared, or
+  served with no `Content-Length` at all, is still caught and stopped mid-
+  download rather than fully buffered into memory first
 - `POST /extract-content`
 
 ### What V1 does *not* promise yet
@@ -218,8 +223,6 @@ field rather than a list.
   attempted here.
 - **Only the first `<article>`/`<main>` is used** — a listing/index page with
   multiple article previews would extract just the first one, not all of them.
-- **No response-size limit** — a very large page is downloaded and parsed in
-  full; no streaming or size cap.
 - **No JavaScript-rendered content** — same limitation as URL discovery, pure
   static HTML only.
 

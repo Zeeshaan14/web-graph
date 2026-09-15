@@ -354,6 +354,47 @@ class TestNonHtmlContentType:
         assert result["urls"] == ["https://example.com/", "https://example.com/a/"]
 
 
+class TestWallClockTimeout:
+    def test_timeout_stops_the_crawl_before_the_page_or_depth_budget_is_reached(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/a/">A</a><a href="/b/">B</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+            "https://example.com/b/": ("https://example.com/b/", "<html>b</html>"),
+        }
+        fake_get = make_fake_get(pages)
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch("url_discovery.crawler.time.monotonic", side_effect=[0, 0, 1000]):
+            # side_effect: [deadline calc, 1st loop check (proceed), 2nd
+            # loop check (deadline blown -- stop before /a/ or /b/)].
+            result = crawl(
+                "https://example.com/", max_pages=10, max_depth=2, timeout_seconds=10,
+            )
+
+        assert result["pages_traversed"] == 1
+        assert result["urls"] == ["https://example.com/"]
+
+    def test_none_is_unbounded_by_wall_clock_time(self):
+        # Regression: passing timeout_seconds=None (the default) must
+        # never call time.monotonic() at all, let alone stop the crawl --
+        # same "None means unbounded" contract as max_pages/max_depth.
+        pages = {
+            "https://example.com/": ("https://example.com/", '<a href="/a/">A</a>'),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+        }
+        fake_get = make_fake_get(pages)
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch("url_discovery.crawler.time.monotonic") as monotonic_mock:
+            result = crawl("https://example.com/", max_pages=10, max_depth=1, timeout_seconds=None)
+
+        monotonic_mock.assert_not_called()
+        assert result["pages_traversed"] == 2
+
+
 class TestFailedRequestIsRecordedNotFatal:
     def test_a_persistently_failing_link_is_recorded_as_an_error_and_does_not_stop_the_crawl(self):
         def fake_get(url, timeout=10):

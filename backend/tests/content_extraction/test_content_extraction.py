@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from content_extraction.content_extraction import BROWSER_HEADERS, extract_content
+from content_extraction.content_extraction import (
+    BROWSER_HEADERS,
+    MAX_RESPONSE_BYTES,
+    extract_content,
+)
 
 PATCH_TARGET = "content_extraction.content_extraction.requests.get"
 
@@ -15,6 +19,7 @@ def make_response(html, status=200, content_type="text/html; charset=utf-8"):
     response.status_code = status
     response.text = html
     response.headers = {"content-type": content_type}
+    response.iter_content.return_value = [html.encode("utf-8")]
     response.raise_for_status.side_effect = (
         requests.HTTPError(f"{status} error") if status >= 400 else None
     )
@@ -173,6 +178,45 @@ class TestFailureHandling:
         assert "unknown content type" in result["error"]
 
 
+class TestResponseSizeLimit:
+    def test_content_length_header_over_cap_returns_failed_without_reading_body(self):
+        response = make_response("<html>small</html>")
+        response.headers["content-length"] = str(MAX_RESPONSE_BYTES + 1)
+        with patch(PATCH_TARGET, return_value=response):
+            result = extract_content("https://example.com/huge")
+
+        assert result["status"] == "failed"
+        assert "too large" in result["error"].lower()
+        response.iter_content.assert_not_called()
+
+    def test_body_exceeding_cap_while_streaming_is_caught_even_without_a_content_length_header(self):
+        response = make_response("<html></html>")
+        response.iter_content.return_value = [b"x" * (MAX_RESPONSE_BYTES + 1)]
+        with patch(PATCH_TARGET, return_value=response):
+            result = extract_content("https://example.com/huge")
+
+        assert result["status"] == "failed"
+        assert "exceed" in result["error"].lower()
+        assert result["paragraphs"] == []
+
+    def test_body_within_the_cap_is_parsed_normally(self):
+        html = "<html><body><article><p>Small page.</p></article></body></html>"
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/")
+
+        assert result["status"] == "success"
+        assert result["paragraphs"] == ["Small page."]
+
+    def test_malformed_content_length_header_is_ignored_not_fatal(self):
+        response = make_response("<html><body><article><p>Fine.</p></article></body></html>")
+        response.headers["content-length"] = "not-a-number"
+        with patch(PATCH_TARGET, return_value=response):
+            result = extract_content("https://example.com/")
+
+        assert result["status"] == "success"
+        assert result["paragraphs"] == ["Fine."]
+
+
 class TestRequestConfiguration:
     def test_sends_browser_headers(self):
         html = "<html><body><article><p>Text.</p></article></body></html>"
@@ -187,3 +231,10 @@ class TestRequestConfiguration:
             extract_content("https://example.com/")
 
         assert mock_get.call_args.kwargs["timeout"] == 10
+
+    def test_streams_the_response_instead_of_buffering_it_whole(self):
+        html = "<html><body><article><p>Text.</p></article></body></html>"
+        with patch(PATCH_TARGET, return_value=make_response(html)) as mock_get:
+            extract_content("https://example.com/")
+
+        assert mock_get.call_args.kwargs["stream"] is True

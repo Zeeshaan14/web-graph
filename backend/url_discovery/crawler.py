@@ -12,6 +12,7 @@
 # (silent unless someone turns on verbose logging).
 
 import logging
+import time
 from collections import deque
 from urllib.parse import urlparse
 
@@ -28,12 +29,20 @@ def crawl(
     max_pages: int | None = 10,
     max_depth: int | None = None,
     path_specific_strip: dict[str, set[str]] | None = None,
+    timeout_seconds: float | None = None,
 ) -> dict:
     """path_specific_strip: optional site-specific noisy query params to
     strip, e.g. {"/feedback/realpython-com/": {"d"}}. See
     link_extraction.normalize_url() -- kept as an explicit argument here
     rather than hardcoded, since crawl() is meant to work for any site,
     not just the one quirk we've seen so far.
+
+    timeout_seconds: an optional wall-clock budget for the whole crawl,
+    checked the same way max_pages is -- before starting the next page,
+    never by interrupting a fetch already in flight. None (the default)
+    means unbounded, same as max_depth; max_pages alone can still take a
+    long time on a slow site, since it says nothing about how long each
+    page takes.
 
     Returns internal traversal data, NOT the public API contract --
     {"urls": [...], "pages_traversed": N, "errors": [...]}. Shaping this
@@ -47,6 +56,8 @@ def crawl(
     start_domain = urlparse(start_url).netloc
 
     session = new_session()
+
+    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
 
     # Each queue entry carries its depth alongside the URL: start_url is
     # depth 0, pages it links to are depth 1, pages those link to are
@@ -80,6 +91,10 @@ def crawl(
     while queue and (
         max_pages is None or len(visited_traversal) < max_pages
     ):
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.debug("Wall-clock timeout reached, stopping crawl (%.0fs budget)", timeout_seconds)
+            break
+
         current_url, depth = queue.popleft()
 
         if current_url in visited_traversal:
@@ -210,6 +225,7 @@ def discover_urls(
     max_pages: int | None = 10,
     max_depth: int | None = None,
     path_specific_strip: dict[str, set[str]] | None = None,
+    timeout_seconds: float | None = None,
 ) -> dict:
     """The feature-level entry point -- this is what the API layer will
     eventually call. crawl() is the traversal engine; this is the
@@ -230,6 +246,7 @@ def discover_urls(
             max_pages=max_pages,
             max_depth=max_depth,
             path_specific_strip=path_specific_strip,
+            timeout_seconds=timeout_seconds,
         )
     except Exception as exc:
         return {
