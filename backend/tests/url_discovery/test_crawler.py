@@ -226,12 +226,12 @@ class TestQueryParamNormalizationDuringCrawl:
 
 class TestRetryDuringCrawl:
     def test_429_mid_crawl_recovers_via_fetcher_and_traversal_continues(self):
-        resp_home = MagicMock(status_code=200, url="https://example.com/", text='<a href="/slow/">Slow</a>')
+        resp_home = MagicMock(status_code=200, url="https://example.com/", text='<a href="/slow/">Slow</a>', headers={})
         resp_home.raise_for_status.side_effect = None
 
         resp_slow_429 = MagicMock(status_code=429, headers={"Retry-After": "1"})
 
-        resp_slow_200 = MagicMock(status_code=200, url="https://example.com/slow/", text="<html>loaded</html>")
+        resp_slow_200 = MagicMock(status_code=200, url="https://example.com/slow/", text="<html>loaded</html>", headers={})
         resp_slow_200.raise_for_status.side_effect = None
 
         session_get = MagicMock(side_effect=[resp_home, resp_slow_429, resp_slow_200])
@@ -297,6 +297,63 @@ class TestMaxDepthBoundary:
         ]
 
 
+class TestNonHtmlContentType:
+    def test_non_html_page_is_still_reported_but_not_parsed_for_links_or_canonical(self):
+        call_log = []
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/report.pdf">Report</a><a href="/about/">About</a>',
+            ),
+            "https://example.com/report.pdf": (
+                "https://example.com/report.pdf",
+                # If this were parsed as HTML, this link would be discovered
+                # and this content-type-checking test would be pointless.
+                '<a href="/hidden-in-a-pdf/">Should never be queued</a>',
+                200,
+                "application/pdf",
+            ),
+            "https://example.com/about/": ("https://example.com/about/", "<html>about</html>"),
+        }
+        result = run(pages, call_log, start_url="https://example.com/", max_pages=10, max_depth=2)
+
+        assert "https://example.com/report.pdf" in result["urls"]
+        assert "https://example.com/about/" in result["urls"]
+        assert "https://example.com/hidden-in-a-pdf/" not in call_log
+        assert result["pages_traversed"] == 3
+        assert result["errors"] == []
+
+    def test_missing_content_type_header_is_treated_as_html_not_skipped(self):
+        # Regression: a page with no content-type header at all (the
+        # default shape of every other fixture in this file) must keep
+        # being parsed as HTML -- missing is not evidence of non-HTML.
+        pages = {
+            "https://example.com/": ("https://example.com/", '<a href="/a/">A</a>'),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=1)
+
+        assert result["urls"] == ["https://example.com/", "https://example.com/a/"]
+
+    def test_content_type_check_is_case_insensitive_and_ignores_charset(self):
+        # Proven by the crawl actually finding /a/ -- if the odd-cased,
+        # charset-suffixed content-type were misread as non-HTML, the
+        # link on the home page would never be extracted.
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/a/">A</a>',
+                200,
+                "TEXT/HTML; charset=UTF-8",
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+        }
+
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=1)
+
+        assert result["urls"] == ["https://example.com/", "https://example.com/a/"]
+
+
 class TestFailedRequestIsRecordedNotFatal:
     def test_a_persistently_failing_link_is_recorded_as_an_error_and_does_not_stop_the_crawl(self):
         def fake_get(url, timeout=10):
@@ -311,7 +368,7 @@ class TestFailedRequestIsRecordedNotFatal:
                 "https://example.com/ok/": ("https://example.com/ok/", "<html>ok</html>"),
             }
             final_url, html = pages[url]
-            resp = MagicMock(status_code=200, url=final_url, text=html)
+            resp = MagicMock(status_code=200, url=final_url, text=html, headers={})
             resp.raise_for_status.side_effect = None
             return resp
 
@@ -374,7 +431,7 @@ class TestDiscoverUrls:
                 "https://example.com/ok/": ("https://example.com/ok/", "<html>ok</html>"),
             }
             final_url, html = pages[url]
-            resp = MagicMock(status_code=200, url=final_url, text=html)
+            resp = MagicMock(status_code=200, url=final_url, text=html, headers={})
             resp.raise_for_status.side_effect = None
             return resp
 
@@ -418,7 +475,7 @@ class TestDiscoverUrls:
                 "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
             }
             final_url, html = pages[url]
-            resp = MagicMock(status_code=200, url=final_url, text=html)
+            resp = MagicMock(status_code=200, url=final_url, text=html, headers={})
             resp.raise_for_status.side_effect = None
             return resp
 

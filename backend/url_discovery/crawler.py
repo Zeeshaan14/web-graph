@@ -136,6 +136,19 @@ def crawl(
         seen.add(current_url)
         seen.add(final_url)
 
+        # A non-HTML response (PDF, image, ...) has no canonical tag and
+        # no <a> links to extract -- feeding it to the HTML parser would
+        # just waste cycles finding nothing. A MISSING content-type
+        # header is treated as HTML (not as a reason to skip): unlike
+        # content_extraction's single-resource contract, getting this
+        # wrong here only means we attempt a parse that finds nothing,
+        # not that we drop a page we should have discovered.
+        content_type = response.headers.get("content-type", "")
+        is_html_page = content_type == "" or "text/html" in content_type.lower()
+
+        if not is_html_page:
+            logger.debug("Non-HTML content-type, skipping parse: %s (%s)", final_url, content_type)
+
         # The preferred URL to REPORT for this page -- starts as
         # final_url, but a same-site canonical (independent of any HTTP
         # redirect) can override it. E.g. /articles/page/2/ and
@@ -143,7 +156,7 @@ def crawl(
         # canonical=/articles/, they should all report as one output URL.
         output_url = final_url
 
-        canonical_url = extract_canonical(response.text, response.url)
+        canonical_url = extract_canonical(response.text, response.url) if is_html_page else None
 
         if canonical_url:
             canonical_url = normalize_url(canonical_url, path_specific_strip)
@@ -162,6 +175,9 @@ def crawl(
         # page itself -- don't even queue them if that would exceed
         # max_depth, same as we already skip already-seen links.
         if max_depth is not None and depth >= max_depth:
+            continue
+
+        if not is_html_page:
             continue
 
         # Always extract links from the page we actually just fetched,

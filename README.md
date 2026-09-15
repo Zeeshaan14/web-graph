@@ -112,8 +112,6 @@ detected at all below `MIN_DETECTION_SCORE` (40).
   development: modern bundled React is often invisible to passive fingerprinting
   even with a browser pass, since production builds frequently expose nothing
   identifiable on `window`.
-- **No CORS configuration** — a browser-based frontend on a different origin
-  (e.g. a future Next.js UI) can't call this API directly yet.
 - **Synchronous only** — same limitation as the other features below; a slow
   browser-fallback detection ties up the request for its full duration.
 
@@ -150,6 +148,11 @@ of this feature:
 - Canonical-based output dedup, without ever blocking traversal (see above)
 - A politeness delay between every request, plus a `Retry-After`-aware retry
   (one retry) on `429`
+- Content-type check before parsing — a non-HTML response (PDF, image, ...)
+  is still traversed and reported in the output, but is never fed to the
+  HTML canonical/link parser; a missing content-type header is treated as
+  HTML (not skipped), since the failure mode of guessing wrong here is just
+  a wasted parse, not a dropped page
 - Structured `success` / `partial` / `failed` outcomes — a handful of broken
   pages inside an otherwise-working crawl is `partial`, not `failed`; nothing
   ever raises a raw exception out of `discover_urls()`
@@ -168,10 +171,6 @@ of this feature:
   not be discovered.
 - **No `robots.txt` or `sitemap.xml` awareness** — the crawler doesn't check
   either; it discovers purely by following on-page links.
-- **No content-type check before parsing** — a link to a PDF/image would be
-  fed to the HTML link extractor as-is (likely yields no links, but wastes a
-  request); `tech_detection`'s evidence pipeline does this check, this one
-  doesn't yet.
 - **No `path_specific_strip` via the API** — the noisy-query-param override
   exists in `discover_urls()`/`crawl()` for direct/CLI callers only; the
   public `/discover-urls` endpoint has no field for it yet.
