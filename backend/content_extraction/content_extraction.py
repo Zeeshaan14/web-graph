@@ -1,3 +1,4 @@
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -7,6 +8,10 @@ from xml.etree import ElementTree
 import requests
 import trafilatura
 from bs4 import BeautifulSoup
+
+from .browser import render_page_html, should_render_with_browser
+
+logger = logging.getLogger(__name__)
 
 # A generous cap for an article/blog-post page, not a file download -- large
 # enough that no real page we've tested against comes close, small enough
@@ -167,9 +172,24 @@ def extract_content(url: str):
         if html is None:
             return _failed(url, f"Response exceeded {MAX_RESPONSE_BYTES}-byte limit while downloading")
 
-        # Title comes straight from the raw HTML, same as before -- this
-        # was never the problem the Smashing Magazine gap was about, and
-        # it's independent of whether trafilatura finds any body content.
+        # If the raw HTML looks like an unrendered app shell, replace it
+        # with a browser-rendered version before extracting ANYTHING from
+        # it -- title included, not just body content: once we've decided
+        # the raw HTML doesn't represent the real page, there's no reason
+        # to trust its <title> either (an SPA's static shell often has a
+        # generic placeholder title, set for real only after JS runs). A
+        # render failure isn't fatal -- html just stays the raw HTML and
+        # extraction proceeds on that basis, same fallback shape as
+        # url_discovery's per-page browser fallback.
+        if should_render_with_browser(html):
+            try:
+                html = render_page_html(url)
+            except Exception as exc:
+                logger.warning("Browser render failed for %s: %s", url, exc)
+
+        # Title comes straight from the HTML above -- this was never the
+        # problem the Smashing Magazine gap was about, and it's
+        # independent of whether trafilatura finds any body content.
         soup = BeautifulSoup(html, "html.parser")
         title = soup.title.get_text(" ", strip=True) if soup.title else None
 

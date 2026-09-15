@@ -16,6 +16,7 @@ from content_extraction.content_extraction import (
 
 PATCH_TARGET = "content_extraction.content_extraction.requests.get"
 SLEEP_TARGET = "content_extraction.content_extraction.time.sleep"
+SHOULD_RENDER_TARGET = "content_extraction.content_extraction.should_render_with_browser"
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +27,19 @@ def no_real_sleep():
     # (TestPacingAndRetry) request their own patch on the same target,
     # which layers cleanly on top of this one for their duration.
     with patch(SLEEP_TARGET):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def no_real_browser():
+    # extract_content() now decides whether the fetched HTML looks like an
+    # unrendered SPA shell and is worth a browser render -- every fixture
+    # in this file is tiny HTML, which would trip that heuristic and try
+    # to launch a real Chromium browser during an "offline" test run.
+    # Autouse so every test defaults to "never render"; TestBrowserFallback
+    # overrides this patch locally for the tests actually exercising the
+    # browser-rendering path itself.
+    with patch(SHOULD_RENDER_TARGET, return_value=False):
         yield
 
 
@@ -334,3 +348,54 @@ class TestPacingAndRetry:
 
         assert result["status"] == "failed"
         assert mock_get.call_count == 1
+
+
+class TestBrowserFallback:
+    RENDER_TARGET = "content_extraction.content_extraction.render_page_html"
+
+    def test_thin_page_is_rendered_and_its_content_is_extracted(self):
+        # Raw HTML is a bare shell with no real content at all; only the
+        # RENDERED html has a real article -- proving the fallback
+        # actually contributes content a pure-HTTP fetch would have missed.
+        shell_html = '<div id="root"></div><script src="/app.js"></script>'
+        rendered_html = (
+            "<html><head><title>Rendered Title</title></head>"
+            "<body><article><h1>Real Heading</h1>"
+            "<p>Real paragraph that only exists after JS runs.</p>"
+            "</article></body></html>"
+        )
+        with patch(PATCH_TARGET, return_value=make_response(shell_html)), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch(self.RENDER_TARGET, return_value=rendered_html) as mock_render:
+            result = extract_content("https://example.com/app")
+
+        mock_render.assert_called_once_with("https://example.com/app")
+        assert result["status"] == "success"
+        assert result["title"] == "Rendered Title"
+        assert result["headings"] == ["Real Heading"]
+        assert result["paragraphs"] == ["Real paragraph that only exists after JS runs."]
+
+    def test_render_failure_falls_back_to_the_raw_html_not_a_failed_result(self):
+        shell_html = '<html><head><title>Shell Title</title></head><body><div id="root"></div></body></html>'
+        with patch(PATCH_TARGET, return_value=make_response(shell_html)), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch(self.RENDER_TARGET, side_effect=RuntimeError("page.goto timed out")):
+            result = extract_content("https://example.com/app")
+
+        # Not a failure -- the raw HTML was still a valid fetch, extraction
+        # just proceeds on it instead of a rendered version.
+        assert result["status"] == "success"
+        assert result["title"] == "Shell Title"
+        assert result["paragraphs"] == []
+
+    def test_a_page_with_enough_visible_text_never_launches_a_browser(self):
+        # Regression: this test does NOT override should_render_with_browser
+        # (autouse patches it to always return False) -- if extract_content()
+        # ever called it wrong, render_page_html would get called here and
+        # this assertion would catch it.
+        html = "<html><body><article><p>Plenty of real, substantial content here.</p></article></body></html>"
+        with patch(PATCH_TARGET, return_value=make_response(html)), \
+             patch(self.RENDER_TARGET) as mock_render:
+            extract_content("https://example.com/")
+
+        mock_render.assert_not_called()

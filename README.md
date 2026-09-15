@@ -262,6 +262,21 @@ field rather than a list.
   every fetch this module makes — its own local copy of the same policy
   `url_discovery/fetcher.py` applies, so a standalone `/extract-content`
   call and every call made during the combined workflow both get it
+- A Playwright browser fallback for JS-rendered content, mirroring
+  `tech_detection`'s HTTP-then-browser split and `url_discovery`'s own
+  per-page version (`content_extraction/browser.py`): the same "visible
+  text length" heuristic decides if the raw HTML looks like an unrendered
+  app shell, and if so the rendered page **replaces** it entirely —
+  including for title extraction, not just body content, since an SPA
+  shell's static `<title>` is often a generic placeholder set for real only
+  after JS runs. Simpler than `url_discovery`'s version: this feature
+  handles one URL per call, so there's no crawl-spanning lifecycle to
+  manage — launch Chromium, render, close, same single-shot shape as
+  `tech_detection/browser.py`. A render failure falls back to the raw HTML
+  rather than failing the request. Verified against a real, locally-served
+  bare SPA shell (`tests/content_extraction/network/`): `"Loading..."` /
+  no content with rendering off, the real rendered title/heading/paragraph
+  with it on
 - `POST /extract-content`
 
 ### What V1 does *not* promise yet
@@ -277,8 +292,11 @@ field rather than a list.
   of adopting a real content-density scorer, not something worked around
   here — a docs *index* page and a blog *listing* page are structurally
   navigation, and a general-purpose article extractor isn't built for them.
-- **No JavaScript-rendered content** — same limitation as URL discovery, pure
-  static HTML only.
+- **The browser fallback only catches a fully unrendered shell, not a
+  hybrid page** — same inherited heuristic limitation as `url_discovery`'s
+  version: real chrome (nav/header/footer) with JS-rendered *main* content
+  sits above the visible-text threshold and never triggers a render, even
+  though the real content is still JS-only.
 
 ## Feature 2C: Discover + extract (combined workflow, V1)
 
@@ -355,10 +373,14 @@ web-graph/
 │   │   ├── crawler.py               #   crawl() = BFS traversal engine; discover_urls() =
 │   │   │                             #   feature contract + safety boundary around it
 │   │   ├── fetcher.py               #   browser-shaped session, pacing, 429 retry
-│   │   └── link_extraction.py       #   normalize_url(), extract_links(), extract_canonical()
+│   │   ├── link_extraction.py       #   normalize_url(), extract_links(), extract_canonical()
+│   │   └── browser.py               #   Playwright fallback -- render + should-render heuristic;
+│   │                                 #   crawler.py owns the browser's LIFECYCLE across the crawl
 │   │
 │   ├── content_extraction/         # feature 2B: pulls title/headings/paragraphs from one URL
-│   │   └── content_extraction.py    #   extract_content() -- single file, single-resource contract
+│   │   ├── content_extraction.py    #   extract_content() -- single file, single-resource contract
+│   │   └── browser.py               #   Playwright fallback -- single-shot (one URL per call,
+│   │                                 #   unlike url_discovery, so no lifecycle to manage)
 │   │
 │   ├── website_processing/         # feature 2C: composes 2A + 2B, owns no HTTP/parsing itself
 │   │   └── pipeline.py               #   discover_and_extract() -- combined status derivation
@@ -372,7 +394,9 @@ web-graph/
 │   │   ├── tech_detection/         # offline regression suite for the detection logic
 │   │   │   └── network/            #   real-site/real-browser checks (marked, opt-in)
 │   │   ├── url_discovery/          # offline regression suite for the crawler
+│   │   │   └── network/            #   + a locally-served bare-SPA-shell browser check
 │   │   ├── content_extraction/     # offline regression suite for content extraction
+│   │   │   └── network/            #   + a locally-served bare-SPA-shell browser check
 │   │   ├── website_processing/     # offline regression suite for the combined workflow
 │   │   └── fakes.py                # shared FakeResponse/FakeSession test helpers
 │   │
@@ -484,6 +508,12 @@ The offline suite (`tests/tech_detection/*.py`, `tests/url_discovery/*.py`,
 under a second and is what should catch a regression (a broken fingerprint, a
 fallback miscalculation, a crawler traversal bug, an extraction parsing bug, a
 combined-status derivation bug, an API wiring bug) before it ships.
-`tests/tech_detection/network/` holds a small set of real-site/real-browser
-checks, excluded by default, for occasionally confirming the whole system still
-works against the live internet.
+`tests/tech_detection/network/`, `tests/url_discovery/network/`, and
+`tests/content_extraction/network/` each hold a small set of real-site/
+real-browser checks, excluded by default, for occasionally confirming the
+whole system still works against the live internet. The two newer ones also
+each serve their own minimal SPA shell locally to verify the browser-fallback
+render path stays exercised as a real, repeatable check — real-world SPA
+shells were found to almost always carry enough server-rendered chrome to
+never trip the fallback heuristic in the first place, so depending on one
+external site to keep proving the mechanism works wasn't reliable.
