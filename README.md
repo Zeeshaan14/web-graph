@@ -208,14 +208,19 @@ field rather than a list.
 
 ### What V1 actually supports
 
-- `article` > `main` > whole-page fallback for where to look for content —
-  now collecting from **every** top-level `article` (or, failing that,
-  every `main`) on the page, not just the first. A nested `<article>` (a
-  listing page's own preview cards inside an outer wrapper) is filtered out
-  before extraction, since the outer one's own text already reaches it —
-  keeping both would double-count that content
-- Boilerplate stripping: `script`/`style`/`noscript`/`nav`/`footer`/`aside`
-  removed before extraction
+- Main-content extraction via [`trafilatura`](https://github.com/adbar/trafilatura)
+  instead of a hand-rolled `article`/`main` tag search — real content-density
+  scoring (link ratio, tag/class signals, DOM structure) rather than "strip
+  this fixed list of tag names and hope." `favor_precision=True` biases it
+  toward excluding borderline content over maximizing how much text comes
+  back, matching what this feature is actually for. Confirmed directly: a
+  realistic recreation of the exact bug below (a CTA in a `<div
+  class="...aside...">`, not a real `<aside>`) is now correctly excluded
+  alongside a real `<aside>`, nav, and footer, leaving only the genuine
+  article paragraphs and headings
+- Title still comes straight from the raw HTML `<title>` tag, independent of
+  whether trafilatura finds any body content at all
+- Boilerplate stripping — now trafilatura's own scoring, not a fixed tag list
 - A browser-shaped request (headers alone got us past a real `403` on
   `realpython.com` during development) — kept as its own local copy rather
   than importing `url_discovery/fetcher.py`, so the two features stay
@@ -235,13 +240,17 @@ field rather than a list.
 
 ### What V1 does *not* promise yet
 
-- **No generic boilerplate/ad/widget removal beyond semantic HTML tags** —
-  confirmed directly during development: a real newsletter-signup CTA on
-  Smashing Magazine survived extraction because it's a `<div>` with "aside"
-  only in a CSS class name, not an actual `<aside>` element, nested inside
-  the article itself. Catching that reliably needs a much more involved
-  approach (what tools like Readability.js/trafilatura exist for) — not
-  attempted here.
+- **Tuned for articles/prose, not link-grid index pages** — confirmed
+  directly during development: a documentation *landing* page that's mostly
+  short link+blurb cards (not prose) under-extracted badly (1 heading, 2
+  paragraphs, vs. the old hand-rolled extractor's ~14/~19 on the same page)
+  once trafilatura correctly recognized the link-heavy layout as
+  navigation-like rather than article content. Genuine prose pages on the
+  same site (a privacy policy, a terms page, a single docs article)
+  extracted comparably to or better than before. This is an honest trade-off
+  of adopting a real content-density scorer, not something worked around
+  here — a docs *index* page and a blog *listing* page are structurally
+  navigation, and a general-purpose article extractor isn't built for them.
 - **No JavaScript-rendered content** — same limitation as URL discovery, pure
   static HTML only.
 

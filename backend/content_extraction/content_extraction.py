@@ -2,8 +2,10 @@ import re
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from xml.etree import ElementTree
 
 import requests
+import trafilatura
 from bs4 import BeautifulSoup
 
 # A generous cap for an article/blog-post page, not a file download -- large
@@ -124,14 +126,19 @@ def _decode_bounded(response: requests.Response, max_bytes: int) -> str | None:
         return bytes(body).decode("utf-8", errors="replace")
 
 
-def _outermost(tags: list) -> list:
-    """Filters out any tag nested inside another tag already in the list --
-    prevents double-counting when e.g. a listing page's <article> preview
-    cards sit inside an outer <article> wrapper: the outer one's find_all
-    below already reaches everything inside the nested ones, so keeping
-    both would count that content twice."""
-    tag_set = set(tags)
-    return [tag for tag in tags if not (set(tag.parents) & tag_set)]
+# Heading levels we report -- matches what the old hand-rolled selector
+# collected (h1-h3, no h4-h6 subsection minutiae), even though
+# trafilatura's own output can include deeper levels.
+HEADING_LEVELS = {"h1", "h2", "h3"}
+
+
+def _element_text(element) -> str:
+    """Joins ALL of an element's text, including any nested inline
+    elements (links, bold, ...) -- trafilatura's XML output is normally
+    already flat plain text, but this is the same defensive join
+    BeautifulSoup's get_text() gave us before, so nothing regresses if
+    that's ever not true. Whitespace is collapsed the same way too."""
+    return " ".join("".join(element.itertext()).split())
 
 
 def extract_content(url: str):
@@ -160,40 +167,46 @@ def extract_content(url: str):
         if html is None:
             return _failed(url, f"Response exceeded {MAX_RESPONSE_BYTES}-byte limit while downloading")
 
+        # Title comes straight from the raw HTML, same as before -- this
+        # was never the problem the Smashing Magazine gap was about, and
+        # it's independent of whether trafilatura finds any body content.
         soup = BeautifulSoup(html, "html.parser")
-
-        # aside alongside script/style/noscript/nav/footer -- sidebars,
-        # related-post widgets, and similar boilerplate commonly live in
-        # <aside>, and their <p> tags would otherwise get pulled in as if
-        # they were real article content.
-        for tag in soup(["script", "style", "noscript", "nav", "footer", "aside"]):
-            tag.decompose()
-
         title = soup.title.get_text(" ", strip=True) if soup.title else None
 
-        articles = soup.find_all("article")
-        mains = soup.find_all("main")
+        # trafilatura replaces the old hand-rolled article/main-picking +
+        # script/style/nav/footer/aside-stripping logic entirely -- real
+        # content-density scoring (link ratio, tag/class signals, DOM
+        # structure) instead of "strip this fixed list of tag names and
+        # hope." favor_precision=True is trafilatura's own documented
+        # setting for biasing toward excluding borderline content rather
+        # than maximizing recall -- matches our goal here, though it isn't
+        # what makes the specific newsletter-CTA test below pass (that one
+        # turns out to hold either way; the density scoring itself is
+        # doing the real work there).
+        extracted_xml = trafilatura.extract(
+            html,
+            url=url,
+            output_format="xml",
+            with_metadata=False,
+            include_comments=False,
+            include_tables=False,
+            favor_precision=True,
+        )
 
-        if articles:
-            content_roots = _outermost(articles)
-        elif mains:
-            content_roots = _outermost(mains)
-        else:
-            content_roots = [soup]
+        headings = []
+        paragraphs = []
 
-        headings = [
-            tag.get_text(" ", strip=True)
-            for root in content_roots
-            for tag in root.find_all(["h1", "h2", "h3"])
-            if tag.get_text(" ", strip=True)
-        ]
-
-        paragraphs = [
-            tag.get_text(" ", strip=True)
-            for root in content_roots
-            for tag in root.find_all("p")
-            if tag.get_text(" ", strip=True)
-        ]
+        if extracted_xml:
+            main = ElementTree.fromstring(extracted_xml).find("main")
+            if main is not None:
+                headings = [
+                    _element_text(el)
+                    for el in main.iter("head")
+                    if el.get("rend") in HEADING_LEVELS and _element_text(el)
+                ]
+                paragraphs = [
+                    _element_text(el) for el in main.iter("p") if _element_text(el)
+                ]
 
         return {
             "status": "success",

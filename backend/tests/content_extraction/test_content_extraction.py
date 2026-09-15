@@ -64,26 +64,6 @@ class TestExtractContentSuccess:
         assert result["paragraphs"] == ["First paragraph.", "Second paragraph."]
         assert result["error"] is None
 
-    def test_prefers_article_over_main_and_whole_page(self):
-        html = """
-        <html><body>
-            <main><p>Main content paragraph.</p></main>
-            <article><p>Article content paragraph.</p></article>
-            <p>Stray page paragraph.</p>
-        </body></html>
-        """
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
-
-        assert result["paragraphs"] == ["Article content paragraph."]
-
-    def test_falls_back_to_main_when_no_article(self):
-        html = "<html><body><main><p>Main content.</p></main><p>Stray.</p></body></html>"
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
-
-        assert result["paragraphs"] == ["Main content."]
-
     def test_falls_back_to_whole_page_when_no_article_or_main(self):
         html = "<html><body><div><p>Just a paragraph.</p></div></body></html>"
         with patch(PATCH_TARGET, return_value=make_response(html)):
@@ -138,73 +118,52 @@ class TestBoilerplateStripping:
 
         assert result["paragraphs"] == ["Real content."]
 
-
-class TestMultipleContentRoots:
-    def test_all_sibling_articles_are_collected_not_just_the_first(self):
+    def test_boilerplate_disguised_as_a_real_tag_is_still_excluded(self):
+        # The actual bug that motivated switching to trafilatura: a real
+        # newsletter-signup CTA on Smashing Magazine survived the OLD
+        # tag-list stripper because it was a <div class="...aside...">,
+        # not an actual <aside> element -- a fixed tag list can never
+        # catch that; content-density scoring can. This recreates that
+        # exact shape (a CTA nested INSIDE the article via a CSS class
+        # that merely looks like an aside) alongside a real <aside> and
+        # normal nav/footer, with enough real paragraph text for
+        # trafilatura's density heuristics to actually have something to
+        # judge -- a one-line paragraph gives it no signal either way.
         html = """
         <html><body>
-            <article><h2>First</h2><p>First paragraph.</p></article>
-            <article><h2>Second</h2><p>Second paragraph.</p></article>
-            <article><h2>Third</h2><p>Third paragraph.</p></article>
-        </body></html>
-        """
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/listing")
-
-        assert result["headings"] == ["First", "Second", "Third"]
-        assert result["paragraphs"] == [
-            "First paragraph.", "Second paragraph.", "Third paragraph.",
-        ]
-
-    def test_all_sibling_mains_are_collected_when_no_article_exists(self):
-        html = """
-        <html><body>
-            <main><p>Main one.</p></main>
-            <main><p>Main two.</p></main>
-        </body></html>
-        """
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
-
-        assert result["paragraphs"] == ["Main one.", "Main two."]
-
-    def test_articles_still_take_priority_over_mains_when_both_exist(self):
-        html = """
-        <html><body>
-            <main><p>Main content.</p></main>
-            <article><p>Article one.</p></article>
-            <article><p>Article two.</p></article>
-        </body></html>
-        """
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
-
-        assert result["paragraphs"] == ["Article one.", "Article two."]
-
-    def test_nested_article_is_not_double_counted(self):
-        # A listing page whose outer <article> wraps smaller <article>
-        # preview cards -- the outer one's own find_all() already reaches
-        # the nested paragraph, so counting the nested <article> AS ITS
-        # OWN root too would report it twice.
-        html = """
-        <html><body>
+            <nav><a href="/">Home</a></nav>
             <article>
-                <h1>Outer</h1>
-                <article><p>Nested card paragraph.</p></article>
+                <h1>How Core Web Vitals Work</h1>
+                <p>Core Web Vitals are a set of specific factors that Google
+                considers important in a webpage's overall user experience.
+                They measure dimensions of web usability such as load time,
+                interactivity, and the stability of content as it loads.</p>
+                <p>The three current Core Web Vitals metrics measure loading
+                performance, interactivity, and visual stability, and each
+                one maps to a concrete, measurable moment in a page's life
+                cycle rather than a vague notion of "feels fast."</p>
+                <div class="c-garfield-aside--meta">
+                    <h3>Get The Newsletter</h3>
+                    <p>Subscribe to our weekly newsletter for the latest
+                    articles on web performance delivered to your inbox.</p>
+                </div>
             </article>
+            <aside>
+                <h3>Related Posts</h3>
+                <p>Check out our other articles on performance optimization.</p>
+            </aside>
+            <footer><p>Copyright 2024 Example Site.</p></footer>
         </body></html>
         """
         with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
+            result = extract_content("https://example.com/core-web-vitals")
 
-        assert result["paragraphs"] == ["Nested card paragraph."]
-
-    def test_single_article_behaves_exactly_as_before(self):
-        html = "<html><body><article><p>Only one.</p></article></body></html>"
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
-
-        assert result["paragraphs"] == ["Only one."]
+        assert result["headings"] == ["How Core Web Vitals Work"]
+        assert len(result["paragraphs"]) == 2
+        combined = " ".join(result["paragraphs"]).lower()
+        assert "newsletter" not in combined
+        assert "related posts" not in combined
+        assert "copyright" not in combined
 
 
 class TestFailureHandling:
