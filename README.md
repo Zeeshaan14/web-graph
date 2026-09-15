@@ -208,7 +208,12 @@ field rather than a list.
 
 ### What V1 actually supports
 
-- `article` > `main` > whole-page fallback for where to look for content
+- `article` > `main` > whole-page fallback for where to look for content —
+  now collecting from **every** top-level `article` (or, failing that,
+  every `main`) on the page, not just the first. A nested `<article>` (a
+  listing page's own preview cards inside an outer wrapper) is filtered out
+  before extraction, since the outer one's own text already reaches it —
+  keeping both would double-count that content
 - Boilerplate stripping: `script`/`style`/`noscript`/`nav`/`footer`/`aside`
   removed before extraction
 - A browser-shaped request (headers alone got us past a real `403` on
@@ -222,6 +227,10 @@ field rather than a list.
   a `Content-Length` header — a response that's larger than declared, or
   served with no `Content-Length` at all, is still caught and stopped mid-
   download rather than fully buffered into memory first
+- A politeness delay and `Retry-After`-aware `429` retry (one retry) around
+  every fetch this module makes — its own local copy of the same policy
+  `url_discovery/fetcher.py` applies, so a standalone `/extract-content`
+  call and every call made during the combined workflow both get it
 - `POST /extract-content`
 
 ### What V1 does *not* promise yet
@@ -233,8 +242,6 @@ field rather than a list.
   the article itself. Catching that reliably needs a much more involved
   approach (what tools like Readability.js/trafilatura exist for) — not
   attempted here.
-- **Only the first `<article>`/`<main>` is used** — a listing/index page with
-  multiple article previews would extract just the first one, not all of them.
 - **No JavaScript-rendered content** — same limitation as URL discovery, pure
   static HTML only.
 
@@ -257,19 +264,24 @@ logic itself — just orchestration and status combination.
     discovery — ending up with zero usable content is worse than "partial" implies)
   - `partial` — discovery was itself partial, **or** extraction results are mixed
   - `success` — discovery succeeded **and** every extraction succeeded
+- Pacing/retry during the extraction phase — closed at its source:
+  `extract_content()` itself now paces and retries every fetch it makes
+  (see Feature 2B above), so this phase gets the same protection the crawl
+  phase always had, without `website_processing` needing to know anything
+  about HTTP
+- Bounded parallel extraction — up to 5 pages extracted at once
+  (`MAX_CONCURRENT_EXTRACTIONS` in `website_processing/pipeline.py`) via a
+  `ThreadPoolExecutor`, instead of one at a time. Deliberately a small,
+  fixed ceiling, not "as many as there are pages": every extraction targets
+  the *same* site the crawl just finished hitting, and `extract_content()`'s
+  own per-call pacing is a per-call guarantee, not an aggregate-rate one --
+  running `N` of them at once means the site sees roughly `N` requests per
+  second, not one. Output order still matches `discovered_urls` order
+  regardless of which extraction finishes first
 - `POST /discover-and-extract`
 
 ### What V1 does *not* promise yet
 
-- **No pacing/retry during the extraction phase** — `discover_urls()` has a
-  politeness delay and `429` retry built in for the *crawl*; once discovery
-  finishes, `extract_content()` is called once per URL back-to-back with
-  none of that protection. A real crawl feeding many URLs into extraction
-  from the same site could get itself rate-limited during that phase with
-  nothing to recover.
-- **No parallelism** — pages are extracted one at a time, sequentially; a
-  20-page combined request means 20 sequential extraction fetches on top of
-  the crawl itself.
 - Inherits every "not yet" item listed above for discovery and extraction
   individually — this feature doesn't paper over either one's gaps.
 

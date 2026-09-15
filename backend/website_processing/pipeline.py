@@ -3,12 +3,23 @@
 # puts THIS file's own folder on sys.path, not the repo root where the
 # url_discovery/ and content_extraction/ sibling packages actually live.
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from url_discovery.crawler import discover_urls
 from content_extraction.content_extraction import extract_content
+
+# A small, fixed ceiling on how many extract_content() calls run at once --
+# not "as many as there are pages," since every one of them targets the
+# SAME site the crawl just finished hitting. extract_content() already
+# paces and retries each of ITS OWN requests (see content_extraction.py),
+# but that's a per-call guarantee, not an aggregate-rate one: running this
+# many of those calls in parallel means the site sees roughly this many
+# requests per second, not one. This is the deliberate limit on how far
+# "parallel" is allowed to go here.
+MAX_CONCURRENT_EXTRACTIONS = 5
 
 
 def discover_and_extract(
@@ -30,11 +41,19 @@ def discover_and_extract(
             "pages": [],
         }
 
-    pages = []
+    urls = discovery_result["discovered_urls"]
 
-    for url in discovery_result["discovered_urls"]:
-        extraction_result = extract_content(url)
-        pages.append(extraction_result)
+    if urls:
+        # ThreadPoolExecutor.map() is the right tool for bounded-concurrent
+        # I/O-bound work in a synchronous codebase -- extract_content()
+        # spends nearly all its time blocked on network I/O, so threads
+        # (not asyncio, not multiprocessing) give real overlap without a
+        # rewrite. map() guarantees the RESULT order matches url order
+        # even though the underlying calls can complete in any order.
+        with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_EXTRACTIONS, len(urls))) as executor:
+            pages = list(executor.map(extract_content, urls))
+    else:
+        pages = []
 
     # pages is guaranteed non-empty here: discover_urls() only reports
     # "success"/"partial" (never "failed", handled above) when at least

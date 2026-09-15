@@ -3,15 +3,30 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from content_extraction.content_extraction import (
     BROWSER_HEADERS,
     MAX_RESPONSE_BYTES,
+    REQUEST_DELAY_SECONDS,
+    RETRY_FALLBACK_SECONDS,
     extract_content,
 )
 
 PATCH_TARGET = "content_extraction.content_extraction.requests.get"
+SLEEP_TARGET = "content_extraction.content_extraction.time.sleep"
+
+
+@pytest.fixture(autouse=True)
+def no_real_sleep():
+    # extract_content() now paces every fetch with a real time.sleep() --
+    # autouse so every test in this file gets that mocked out without
+    # having to say so itself; tests that care about the sleep CALLS
+    # (TestPacingAndRetry) request their own patch on the same target,
+    # which layers cleanly on top of this one for their duration.
+    with patch(SLEEP_TARGET):
+        yield
 
 
 def make_response(html, status=200, content_type="text/html; charset=utf-8"):
@@ -122,6 +137,74 @@ class TestBoilerplateStripping:
             result = extract_content("https://example.com/")
 
         assert result["paragraphs"] == ["Real content."]
+
+
+class TestMultipleContentRoots:
+    def test_all_sibling_articles_are_collected_not_just_the_first(self):
+        html = """
+        <html><body>
+            <article><h2>First</h2><p>First paragraph.</p></article>
+            <article><h2>Second</h2><p>Second paragraph.</p></article>
+            <article><h2>Third</h2><p>Third paragraph.</p></article>
+        </body></html>
+        """
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/listing")
+
+        assert result["headings"] == ["First", "Second", "Third"]
+        assert result["paragraphs"] == [
+            "First paragraph.", "Second paragraph.", "Third paragraph.",
+        ]
+
+    def test_all_sibling_mains_are_collected_when_no_article_exists(self):
+        html = """
+        <html><body>
+            <main><p>Main one.</p></main>
+            <main><p>Main two.</p></main>
+        </body></html>
+        """
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/")
+
+        assert result["paragraphs"] == ["Main one.", "Main two."]
+
+    def test_articles_still_take_priority_over_mains_when_both_exist(self):
+        html = """
+        <html><body>
+            <main><p>Main content.</p></main>
+            <article><p>Article one.</p></article>
+            <article><p>Article two.</p></article>
+        </body></html>
+        """
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/")
+
+        assert result["paragraphs"] == ["Article one.", "Article two."]
+
+    def test_nested_article_is_not_double_counted(self):
+        # A listing page whose outer <article> wraps smaller <article>
+        # preview cards -- the outer one's own find_all() already reaches
+        # the nested paragraph, so counting the nested <article> AS ITS
+        # OWN root too would report it twice.
+        html = """
+        <html><body>
+            <article>
+                <h1>Outer</h1>
+                <article><p>Nested card paragraph.</p></article>
+            </article>
+        </body></html>
+        """
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/")
+
+        assert result["paragraphs"] == ["Nested card paragraph."]
+
+    def test_single_article_behaves_exactly_as_before(self):
+        html = "<html><body><article><p>Only one.</p></article></body></html>"
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/")
+
+        assert result["paragraphs"] == ["Only one."]
 
 
 class TestFailureHandling:
@@ -238,3 +321,57 @@ class TestRequestConfiguration:
             extract_content("https://example.com/")
 
         assert mock_get.call_args.kwargs["stream"] is True
+
+
+class TestPacingAndRetry:
+    def test_pacing_delay_follows_every_request(self):
+        html = "<html><body><article><p>Text.</p></article></body></html>"
+        with patch(PATCH_TARGET, return_value=make_response(html)), \
+             patch(SLEEP_TARGET) as mock_sleep:
+            extract_content("https://example.com/")
+
+        assert any(call.args and call.args[0] == REQUEST_DELAY_SECONDS for call in mock_sleep.call_args_list)
+
+    def test_429_with_retry_after_header_waits_then_succeeds(self):
+        response_429 = make_response("", status=429)
+        response_429.headers["Retry-After"] = "2"
+        response_200 = make_response("<html><body><article><p>Recovered.</p></article></body></html>")
+
+        with patch(PATCH_TARGET, side_effect=[response_429, response_200]) as mock_get, \
+             patch(SLEEP_TARGET) as mock_sleep:
+            result = extract_content("https://example.com/")
+
+        assert result["status"] == "success"
+        assert result["paragraphs"] == ["Recovered."]
+        assert mock_get.call_count == 2
+        assert any(call.args and call.args[0] == 2.0 for call in mock_sleep.call_args_list)
+
+    def test_429_without_retry_after_uses_the_fallback_wait(self):
+        response_429 = make_response("", status=429)
+        response_200 = make_response("<html><body><article><p>Recovered.</p></article></body></html>")
+
+        with patch(PATCH_TARGET, side_effect=[response_429, response_200]), \
+             patch(SLEEP_TARGET) as mock_sleep:
+            result = extract_content("https://example.com/")
+
+        assert result["status"] == "success"
+        assert any(
+            call.args and call.args[0] == RETRY_FALLBACK_SECONDS for call in mock_sleep.call_args_list
+        )
+
+    def test_persistent_429_is_reported_as_failed_after_exactly_one_retry(self):
+        response_429_first = make_response("", status=429)
+        response_429_second = make_response("", status=429)
+
+        with patch(PATCH_TARGET, side_effect=[response_429_first, response_429_second]) as mock_get:
+            result = extract_content("https://example.com/")
+
+        assert result["status"] == "failed"
+        assert mock_get.call_count == 2  # exactly one retry, not a retry loop
+
+    def test_non_429_failure_is_not_retried(self):
+        with patch(PATCH_TARGET, return_value=make_response("", status=500)) as mock_get:
+            result = extract_content("https://example.com/")
+
+        assert result["status"] == "failed"
+        assert mock_get.call_count == 1

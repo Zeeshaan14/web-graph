@@ -1,4 +1,7 @@
 import re
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import requests
 from bs4 import BeautifulSoup
@@ -21,6 +24,67 @@ BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+# Politeness pacing and 429 handling, applied to every fetch this module
+# makes -- same values, same one-retry policy, and same reasoning as
+# url_discovery/fetcher.py's REQUEST_DELAY_SECONDS/RETRY_FALLBACK_SECONDS.
+# Duplicated rather than imported for the same self-containment reason as
+# BROWSER_HEADERS above: this is what closes the README gap where
+# website_processing's extraction phase called extract_content() once per
+# URL back-to-back with none of the crawl phase's rate-limit protection --
+# fixing it here, at the source of every HTTP call this module makes,
+# means every caller (the standalone /extract-content endpoint included)
+# gets it, not just the combined workflow.
+REQUEST_DELAY_SECONDS = 1.0
+RETRY_FALLBACK_SECONDS = 5.0
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Same parsing as url_discovery/fetcher.py's version: Retry-After is
+    either a plain integer number of seconds, or an HTTP-date. Returns None
+    if the header is absent or doesn't parse as either form."""
+    if not value:
+        return None
+
+    value = value.strip()
+
+    if value.isdigit():
+        return float(value)
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+
+    return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0)
+
+
+def _fetch(url: str) -> requests.Response:
+    """One polite GET: a controlled retry on 429 (Retry-After if present,
+    otherwise a fallback backoff, then exactly one retry), and a pacing
+    delay after every attempt regardless of outcome. Does NOT call
+    raise_for_status() -- that's extract_content()'s job, same division as
+    url_discovery: this owns fetching, the caller owns what a bad status
+    means."""
+    try:
+        response = requests.get(url, headers=BROWSER_HEADERS, timeout=10, stream=True)
+
+        if response.status_code == 429:
+            wait_seconds = _parse_retry_after(response.headers.get("Retry-After"))
+
+            if wait_seconds is None:
+                wait_seconds = RETRY_FALLBACK_SECONDS
+
+            time.sleep(wait_seconds)
+
+            response = requests.get(url, headers=BROWSER_HEADERS, timeout=10, stream=True)
+
+        return response
+    finally:
+        time.sleep(REQUEST_DELAY_SECONDS)
 
 
 def _failed(url: str, error: str) -> dict:
@@ -60,9 +124,19 @@ def _decode_bounded(response: requests.Response, max_bytes: int) -> str | None:
         return bytes(body).decode("utf-8", errors="replace")
 
 
+def _outermost(tags: list) -> list:
+    """Filters out any tag nested inside another tag already in the list --
+    prevents double-counting when e.g. a listing page's <article> preview
+    cards sit inside an outer <article> wrapper: the outer one's find_all
+    below already reaches everything inside the nested ones, so keeping
+    both would count that content twice."""
+    tag_set = set(tags)
+    return [tag for tag in tags if not (set(tag.parents) & tag_set)]
+
+
 def extract_content(url: str):
     try:
-        response = requests.get(url, headers=BROWSER_HEADERS, timeout=10, stream=True)
+        response = _fetch(url)
         response.raise_for_status()
 
         content_type = response.headers.get("content-type", "")
@@ -97,25 +171,27 @@ def extract_content(url: str):
 
         title = soup.title.get_text(" ", strip=True) if soup.title else None
 
-        article = soup.find("article")
-        main = soup.find("main")
+        articles = soup.find_all("article")
+        mains = soup.find_all("main")
 
-        if article:
-            content_root = article
-        elif main:
-            content_root = main
+        if articles:
+            content_roots = _outermost(articles)
+        elif mains:
+            content_roots = _outermost(mains)
         else:
-            content_root = soup
+            content_roots = [soup]
 
         headings = [
             tag.get_text(" ", strip=True)
-            for tag in content_root.find_all(["h1", "h2", "h3"])
+            for root in content_roots
+            for tag in root.find_all(["h1", "h2", "h3"])
             if tag.get_text(" ", strip=True)
         ]
 
         paragraphs = [
             tag.get_text(" ", strip=True)
-            for tag in content_root.find_all("p")
+            for root in content_roots
+            for tag in root.find_all("p")
             if tag.get_text(" ", strip=True)
         ]
 
