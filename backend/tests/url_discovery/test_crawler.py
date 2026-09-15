@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import requests
 
 from url_discovery.crawler import crawl, discover_urls
-from tests.url_discovery.helpers import make_fake_get
+from tests.url_discovery.helpers import make_fake_get, make_not_found_response
 
 
 def run(pages, call_log=None, **kwargs):
@@ -234,7 +234,15 @@ class TestRetryDuringCrawl:
         resp_slow_200 = MagicMock(status_code=200, url="https://example.com/slow/", text="<html>loaded</html>", headers={})
         resp_slow_200.raise_for_status.side_effect = None
 
-        session_get = MagicMock(side_effect=[resp_home, resp_slow_429, resp_slow_200])
+        session_get = MagicMock(
+            side_effect=[
+                make_not_found_response("https://example.com/robots.txt"),
+                make_not_found_response("https://example.com/sitemap.xml"),
+                resp_home,
+                resp_slow_429,
+                resp_slow_200,
+            ]
+        )
 
         with patch("url_discovery.fetcher.requests.Session.get", session_get), \
              patch("url_discovery.fetcher.time.sleep") as sleep_mock:
@@ -242,7 +250,7 @@ class TestRetryDuringCrawl:
 
         assert "https://example.com/slow/" in result["urls"]
         assert result["errors"] == []  # recovered -- not a recorded failure
-        assert session_get.call_count == 3
+        assert session_get.call_count == 5  # robots.txt + sitemap.xml + home + 429 + retry
         assert any(call.args and call.args[0] == 1.0 for call in sleep_mock.call_args_list)
 
 
@@ -398,6 +406,9 @@ class TestWallClockTimeout:
 class TestFailedRequestIsRecordedNotFatal:
     def test_a_persistently_failing_link_is_recorded_as_an_error_and_does_not_stop_the_crawl(self):
         def fake_get(url, timeout=10):
+            if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
+                return make_not_found_response(url)
+
             if url == "https://example.com/broken/":
                 raise requests.ConnectionError("boom")
 
@@ -462,6 +473,9 @@ class TestDiscoverUrls:
 
     def test_partial_when_some_pages_fail_but_others_succeed(self):
         def fake_get(url, timeout=10):
+            if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
+                return make_not_found_response(url)
+
             if url == "https://example.com/broken/":
                 raise requests.ConnectionError("boom")
             pages = {
@@ -506,6 +520,9 @@ class TestDiscoverUrls:
         # an otherwise-successful crawl must not be treated the same as
         # "we couldn't meaningfully crawl the site at all."
         def fake_get(url, timeout=10):
+            if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
+                return make_not_found_response(url)
+
             if url == "https://example.com/old-page/":
                 raise requests.HTTPError("404 Client Error")
             pages = {
@@ -556,3 +573,204 @@ class TestDiscoverUrls:
             result = discover_urls("https://example.com/?utm_source=test", max_pages=10, max_depth=0)
 
         assert result["start_url"] == "https://example.com/?utm_source=test"
+
+
+class TestRobotsTxt:
+    def test_disallowed_path_is_never_fetched_or_reported(self):
+        pages = {
+            "https://example.com/robots.txt": (
+                "https://example.com/robots.txt",
+                "User-agent: *\nDisallow: /private/\n",
+            ),
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/private/">Private</a><a href="/public/">Public</a>',
+            ),
+            "https://example.com/public/": ("https://example.com/public/", "<html>public</html>"),
+        }
+        call_log = []
+        fake_get = make_fake_get(pages, call_log)
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        assert "https://example.com/private/" not in call_log
+        assert "https://example.com/private/" not in result["urls"]
+        assert "https://example.com/public/" in result["urls"]
+
+    def test_robots_txt_fetch_itself_is_not_counted_as_a_traversed_page(self):
+        pages = {
+            "https://example.com/robots.txt": (
+                "https://example.com/robots.txt", "User-agent: *\nDisallow:\n",
+            ),
+            "https://example.com/": ("https://example.com/", "<html>home</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=0)
+
+        assert result["pages_traversed"] == 1
+        assert result["urls"] == ["https://example.com/"]
+
+    def test_missing_robots_txt_allows_everything(self):
+        # No explicit robots.txt entry -- make_fake_get's default 404
+        # fallback kicks in, which must mean "nothing disallowed," the
+        # same convention Python's own robotparser.read() follows.
+        pages = {
+            "https://example.com/": ("https://example.com/", "<html>home</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=0)
+
+        assert result["urls"] == ["https://example.com/"]
+
+    def test_403_on_robots_txt_blocks_the_entire_crawl(self):
+        def fake_get(url, timeout=10):
+            if url == "https://example.com/robots.txt":
+                response = MagicMock(status_code=403, headers={})
+                error = requests.HTTPError("403 error")
+                error.response = response
+                response.raise_for_status.side_effect = error
+                return response
+            if url == "https://example.com/sitemap.xml":
+                return make_not_found_response(url)
+            raise AssertionError(f"unexpected fetch while robots.txt should have blocked everything: {url}")
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        assert result["urls"] == []
+        assert result["pages_traversed"] == 0
+
+    def test_connection_error_fetching_robots_txt_does_not_block_the_crawl(self):
+        # Erring toward "allowed" here: a network hiccup fetching
+        # robots.txt itself is not evidence the site wants nothing
+        # crawled, and silently killing the whole crawl over it would be
+        # a worse failure mode than proceeding.
+        def fake_get(url, timeout=10):
+            if url == "https://example.com/robots.txt":
+                raise requests.ConnectionError("robots.txt unreachable")
+            if url == "https://example.com/sitemap.xml":
+                return make_not_found_response(url)
+            pages = {"https://example.com/": ("https://example.com/", "<html>home</html>")}
+            final_url, html = pages[url]
+            resp = MagicMock(status_code=200, url=final_url, text=html, headers={})
+            resp.raise_for_status.side_effect = None
+            return resp
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = crawl("https://example.com/", max_pages=10, max_depth=0)
+
+        assert result["urls"] == ["https://example.com/"]
+
+
+class TestSitemap:
+    SITEMAP_XML = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        "<url><loc>https://example.com/from-sitemap-1/</loc></url>"
+        "<url><loc>https://example.com/from-sitemap-2/</loc></url>"
+        "</urlset>"
+    )
+
+    def test_sitemap_urls_are_seeded_and_traversed(self):
+        pages = {
+            "https://example.com/sitemap.xml": ("https://example.com/sitemap.xml", self.SITEMAP_XML),
+            "https://example.com/": ("https://example.com/", "<html>home, no links</html>"),
+            "https://example.com/from-sitemap-1/": ("https://example.com/from-sitemap-1/", "<html>1</html>"),
+            "https://example.com/from-sitemap-2/": ("https://example.com/from-sitemap-2/", "<html>2</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=0)
+
+        assert "https://example.com/from-sitemap-1/" in result["urls"]
+        assert "https://example.com/from-sitemap-2/" in result["urls"]
+        # home + 2 sitemap urls -- the sitemap.xml fetch itself doesn't count.
+        assert result["pages_traversed"] == 3
+
+    def test_sitemap_fetch_itself_never_appears_in_output(self):
+        pages = {
+            "https://example.com/sitemap.xml": ("https://example.com/sitemap.xml", self.SITEMAP_XML),
+            "https://example.com/": ("https://example.com/", "<html>home</html>"),
+            "https://example.com/from-sitemap-1/": ("https://example.com/from-sitemap-1/", "<html>1</html>"),
+            "https://example.com/from-sitemap-2/": ("https://example.com/from-sitemap-2/", "<html>2</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=0)
+
+        assert "https://example.com/sitemap.xml" not in result["urls"]
+
+    def test_robots_txt_declared_sitemap_takes_precedence_over_default_path(self):
+        pages = {
+            "https://example.com/robots.txt": (
+                "https://example.com/robots.txt",
+                "User-agent: *\nDisallow:\nSitemap: https://example.com/custom-sitemap.xml\n",
+            ),
+            "https://example.com/custom-sitemap.xml": (
+                "https://example.com/custom-sitemap.xml",
+                "<urlset><url><loc>https://example.com/from-custom/</loc></url></urlset>",
+            ),
+            "https://example.com/": ("https://example.com/", "<html>home</html>"),
+            "https://example.com/from-custom/": ("https://example.com/from-custom/", "<html>custom</html>"),
+        }
+        fake_get = make_fake_get(pages)
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get) as mock_get, \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = crawl("https://example.com/", max_pages=10, max_depth=0)
+
+        assert "https://example.com/from-custom/" in result["urls"]
+        # The default /sitemap.xml path is never requested once robots.txt
+        # names a specific one.
+        requested_urls = [call.args[0] for call in mock_get.call_args_list]
+        assert "https://example.com/sitemap.xml" not in requested_urls
+        assert "https://example.com/custom-sitemap.xml" in requested_urls
+
+    def test_off_site_sitemap_entries_are_not_seeded(self):
+        pages = {
+            "https://example.com/sitemap.xml": (
+                "https://example.com/sitemap.xml",
+                "<urlset><url><loc>https://other.com/elsewhere/</loc></url></urlset>",
+            ),
+            "https://example.com/": ("https://example.com/", "<html>home</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=0)
+
+        assert result["urls"] == ["https://example.com/"]
+
+    def test_malformed_sitemap_xml_does_not_break_the_crawl(self):
+        pages = {
+            "https://example.com/sitemap.xml": ("https://example.com/sitemap.xml", "not valid xml <<<"),
+            "https://example.com/": ("https://example.com/", "<html>home</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=0)
+
+        assert result["urls"] == ["https://example.com/"]
+        assert result["pages_traversed"] == 1
+
+    def test_no_sitemap_present_crawls_normally(self):
+        pages = {
+            "https://example.com/": ("https://example.com/", '<a href="/a/">A</a>'),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=1)
+
+        assert result["urls"] == ["https://example.com/", "https://example.com/a/"]
+
+
+class TestWwwIsSameSiteDuringCrawl:
+    def test_redirect_to_www_variant_is_not_treated_as_external(self):
+        pages = {
+            "https://example.com/": ("https://www.example.com/", "<html>home</html>"),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=0)
+
+        assert result["urls"] == ["https://www.example.com/"]
+        assert result["errors"] == []
+
+    def test_canonical_pointing_to_www_variant_is_honored(self):
+        pages = {
+            "https://example.com/page": (
+                "https://example.com/page",
+                '<link rel="canonical" href="https://www.example.com/page">',
+            ),
+        }
+        result = run(pages, start_url="https://example.com/page", max_pages=10, max_depth=0)
+
+        assert result["urls"] == ["https://www.example.com/page"]

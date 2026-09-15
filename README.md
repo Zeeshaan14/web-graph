@@ -165,6 +165,24 @@ of this feature:
   for direct callers; the public endpoint does not), `max_depth` optional,
   `path_specific_strip` accepted as `{path: [params]}` and converted to sets
   before reaching `discover_urls()`
+- `robots.txt` awareness — always on, not caller-toggled: fetched once per
+  crawl (not counted toward `max_pages`/`pages_traversed`), checked against
+  the `User-agent: *` group before every fetch, including the start URL.
+  Mirrors Python's own `robotparser` convention for a bad fetch: `401`/`403`
+  blocks the whole crawl, anything else (`404`, connection failure, ...)
+  means nothing is disallowed
+- `sitemap.xml` support — one sitemap (the first one `robots.txt` declares
+  via `Sitemap:`, or the conventional `/sitemap.xml` if it declares none) is
+  fetched once and its URLs seeded into the crawl at depth 0, same-site-
+  filtered like any other URL. Deliberately scoped to a single, non-index
+  sitemap file — a `<sitemapindex>` pointing at several child sitemaps is
+  not followed. A missing or unparseable sitemap just means nothing extra
+  to seed, never a crawl failure
+- Same-site scope treats a leading `www.` as a cosmetic alias — `www.site.com`
+  and `site.com` count as the same site for redirects, canonicals, and link
+  filtering. No broader subdomain match is assumed: `blog.site.com` and
+  `site.com` are still treated as different sites, since that's genuinely
+  ambiguous and a generic crawler shouldn't guess
 
 ### What V1 does *not* promise yet
 
@@ -175,12 +193,6 @@ of this feature:
   browser rendering step (unlike `tech_detection`, this feature has no
   Playwright fallback). Links only added to the DOM by client-side JS will
   not be discovered.
-- **No `robots.txt` or `sitemap.xml` awareness** — the crawler doesn't check
-  either; it discovers purely by following on-page links.
-- **Subdomains are treated as different domains** — scope is an exact
-  hostname match against the start URL, so `www.site.com` and `site.com`
-  (or any other subdomain) are never treated as the same site, even if a
-  real visitor would consider them one.
 - **Synchronous only** — a crawl runs inline within one HTTP request; there's
   no background-job/poll pattern yet (see the API section below for why that
   matters for production).

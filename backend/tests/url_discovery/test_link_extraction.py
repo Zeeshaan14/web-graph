@@ -1,7 +1,7 @@
 # Regression suite for link_extraction.py: URL normalization, link
 # discovery, and canonical-tag extraction. Fully offline.
 
-from url_discovery.link_extraction import extract_canonical, extract_links, normalize_url
+from url_discovery.link_extraction import extract_canonical, extract_links, is_same_site, normalize_url
 
 
 class TestNormalizeUrl:
@@ -65,6 +65,27 @@ class TestNormalizeUrl:
         assert a == b
 
 
+class TestIsSameSite:
+    def test_identical_netlocs_are_the_same_site(self):
+        assert is_same_site("example.com", "example.com") is True
+
+    def test_www_prefix_either_direction_is_the_same_site(self):
+        assert is_same_site("www.example.com", "example.com") is True
+        assert is_same_site("example.com", "www.example.com") is True
+
+    def test_other_subdomains_are_not_collapsed(self):
+        # The deliberate line: www is a cosmetic alias, but blog.x.com and
+        # x.com are not assumed to be the same site just because they
+        # share an apex domain.
+        assert is_same_site("blog.example.com", "example.com") is False
+
+    def test_completely_different_domains_are_not_the_same_site(self):
+        assert is_same_site("example.com", "other.com") is False
+
+    def test_www_of_a_different_domain_is_still_different(self):
+        assert is_same_site("www.example.com", "www.other.com") is False
+
+
 class TestExtractLinks:
     def test_resolves_relative_links(self):
         html = '<a href="/about">About</a>'
@@ -90,6 +111,18 @@ class TestExtractLinks:
         rules = {"/feedback/x/": {"d"}}
         html = '<a href="/feedback/x/?d=AAA">FB1</a><a href="/feedback/x/?d=BBB">FB2</a>'
         assert extract_links(html, "https://example.com/", rules) == ["https://example.com/feedback/x/"]
+
+    def test_www_variant_link_is_not_filtered_as_external(self):
+        html = '<a href="https://www.example.com/about">About</a>'
+        assert extract_links(html, "https://example.com/") == ["https://www.example.com/about"]
+
+    def test_non_www_link_from_a_www_base_page_is_not_filtered_as_external(self):
+        html = '<a href="https://example.com/about">About</a>'
+        assert extract_links(html, "https://www.example.com/") == ["https://example.com/about"]
+
+    def test_other_subdomain_link_is_still_filtered_as_external(self):
+        html = '<a href="https://blog.example.com/post">Post</a>'
+        assert extract_links(html, "https://example.com/") == []
 
 
 class TestExtractCanonical:

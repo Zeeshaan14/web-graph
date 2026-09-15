@@ -57,6 +57,21 @@ def normalize_url(url: str, path_specific_strip: dict[str, set[str]] | None = No
     )
 
 
+def is_same_site(netloc_a: str, netloc_b: str) -> bool:
+    """True if two already-normalized (lowercased) netlocs count as the
+    same site for crawl-scope purposes. A leading "www." is treated as a
+    cosmetic alias -- www.example.com and example.com are the same site --
+    but no other subdomain difference is collapsed: blog.example.com and
+    example.com are genuinely different sections/systems as often as they
+    are the same site, and a generic crawler assuming otherwise would
+    silently widen its own scope in a way a caller can't opt out of."""
+
+    def _strip_www(netloc: str) -> str:
+        return netloc[4:] if netloc.startswith("www.") else netloc
+
+    return _strip_www(netloc_a) == _strip_www(netloc_b)
+
+
 def extract_links(
     html: str,
     base_url: str,
@@ -78,8 +93,8 @@ def extract_links(
 
         parsed = urlparse(clean_url)
 
-        # Ignore external domains
-        if parsed.netloc != base_domain:
+        # Ignore external domains (a leading "www." doesn't count as external)
+        if not is_same_site(parsed.netloc, base_domain):
             continue
 
         # Ignore duplicate URLs

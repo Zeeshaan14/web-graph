@@ -15,13 +15,90 @@ import logging
 import time
 from collections import deque
 from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
+from xml.etree import ElementTree
 
 import requests
 
 from .fetcher import fetch, new_session
-from .link_extraction import extract_canonical, extract_links, normalize_url
+from .link_extraction import extract_canonical, extract_links, is_same_site, normalize_url
 
 logger = logging.getLogger(__name__)
+
+# We don't crawl under a registered bot identity, so there's no specific
+# User-agent group in a robots.txt for us to match -- checking "*" is what
+# every generic crawler checks against: the rules meant for everyone.
+ROBOTS_USER_AGENT = "*"
+
+
+def _load_robots_policy(session, scheme: str, domain: str) -> RobotFileParser:
+    """Fetches and parses robots.txt for the site being crawled -- always
+    on, not a caller-toggled option, same as the politeness pacing in
+    fetcher.py. Mirrors the standard library's own RobotFileParser.read()
+    convention for what a fetch failure means: 401/403 -> the whole site is
+    off-limits (disallow_all), any other error (404, connection failure,
+    timeout, ...) -> no robots.txt to restrict us (allow_all). This one
+    fetch doesn't count toward max_pages/pages_traversed -- it's crawler
+    policy, not a discovered page."""
+    policy = RobotFileParser()
+    robots_url = f"{scheme}://{domain}/robots.txt"
+
+    try:
+        response = fetch(session, robots_url)
+        policy.parse(response.text.splitlines())
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status in (401, 403):
+            policy.disallow_all = True
+        else:
+            policy.allow_all = True
+    except requests.RequestException:
+        policy.allow_all = True
+
+    return policy
+
+
+def _discover_sitemap_urls(
+    session,
+    scheme: str,
+    domain: str,
+    robots_policy: RobotFileParser,
+    path_specific_strip: dict[str, set[str]] | None,
+) -> list[str]:
+    """Seeds extra same-site URLs from ONE sitemap -- the first one robots.txt
+    declares via a `Sitemap:` line, or the conventional /sitemap.xml if it
+    declares none. Deliberately scoped to a single, non-index sitemap file:
+    a real sitemap can be a <sitemapindex> pointing at many child sitemaps,
+    which this does not follow -- chasing an index is a bigger feature than
+    "read the sitemap," not attempted here. Never raises: a missing or
+    unparseable sitemap just means nothing extra to seed, not a crawl
+    failure."""
+    declared = robots_policy.site_maps()
+    sitemap_url = declared[0] if declared else f"{scheme}://{domain}/sitemap.xml"
+
+    try:
+        response = fetch(session, sitemap_url)
+    except requests.RequestException:
+        return []
+
+    try:
+        root = ElementTree.fromstring(response.text)
+    except ElementTree.ParseError:
+        logger.debug("Sitemap at %s is not valid XML, ignoring", sitemap_url)
+        return []
+
+    urls = []
+
+    for element in root.iter():
+        # Namespace-agnostic: a real sitemap's tags are namespaced
+        # (e.g. "{http://www.sitemaps.org/schemas/sitemap/0.9}loc"), and
+        # ElementTree keeps that namespace as part of .tag.
+        if element.tag.endswith("loc") and element.text:
+            clean_url = normalize_url(element.text.strip(), path_specific_strip)
+            if is_same_site(urlparse(clean_url).netloc, domain):
+                urls.append(clean_url)
+
+    return urls
 
 
 def crawl(
@@ -53,20 +130,33 @@ def crawl(
     a whole, and it never catches anything else. An unexpected exception
     here is meant to propagate out to discover_urls()."""
     start_url = normalize_url(start_url, path_specific_strip)
-    start_domain = urlparse(start_url).netloc
+    start_parsed = urlparse(start_url)
+    start_domain = start_parsed.netloc
 
     session = new_session()
+
+    robots_policy = _load_robots_policy(session, start_parsed.scheme, start_domain)
+    sitemap_urls = _discover_sitemap_urls(
+        session, start_parsed.scheme, start_domain, robots_policy, path_specific_strip
+    )
 
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
 
     # Each queue entry carries its depth alongside the URL: start_url is
     # depth 0, pages it links to are depth 1, pages those link to are
-    # depth 2, and so on.
+    # depth 2, and so on. Sitemap-sourced URLs are seeded at depth 0 too --
+    # they're a direct hint from the site itself, not something reached by
+    # following a link, so they shouldn't be penalized as "deeper."
     queue = deque([(start_url, 0)])
 
     # URLs already added to the queue.
     # Prevents the same URL being queued multiple times.
     seen = {start_url}
+
+    for sitemap_url in sitemap_urls:
+        if sitemap_url not in seen:
+            seen.add(sitemap_url)
+            queue.append((sitemap_url, 0))
 
     # TRAVERSAL identity: which final destinations we've actually
     # fetched and expanded. /articles/ and /articles/page/2/ are
@@ -96,6 +186,10 @@ def crawl(
             break
 
         current_url, depth = queue.popleft()
+
+        if not robots_policy.can_fetch(ROBOTS_USER_AGENT, current_url):
+            logger.debug("Disallowed by robots.txt: %s", current_url)
+            continue
 
         if current_url in visited_traversal:
             # Already reached this exact URL earlier -- e.g. it was
@@ -127,7 +221,7 @@ def crawl(
         # requested URL is already in `seen` (it got there before being
         # queued), so it won't be retried -- but the external
         # destination itself is never recorded or expanded.
-        if final_domain != start_domain:
+        if not is_same_site(final_domain, start_domain):
             logger.debug("External redirect, stopping: %s -> %s", current_url, final_url)
             continue
 
@@ -179,7 +273,7 @@ def crawl(
 
             logger.debug("Canonical: %s -> %s", final_url, canonical_url)
 
-            if canonical_domain == start_domain:
+            if is_same_site(canonical_domain, start_domain):
                 output_url = canonical_url
 
         if output_url not in output_seen:
