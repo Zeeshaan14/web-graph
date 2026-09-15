@@ -21,12 +21,18 @@ nothing's left. See each feature's own section below for exactly what it does
 and doesn't promise yet; nothing here should be assumed more complete than
 what's actually written down.
 
-The project is organized by feature, not by generic layers: `tech_detection/`,
-`url_discovery/`, and `content_extraction/` are each self-contained, independent
-business logic — `website_processing/` sits one level up and *composes* two of
-them (discovery + extraction) without owning any HTTP/parsing logic itself.
-`api/` stays a thin layer that routes to whichever feature (or composition)
-it's exposing, never a dumping ground for logic from any of them.
+The repo is split into two top-level folders: `backend/` (Python, FastAPI --
+everything below) and `frontend/` (Next.js -- see [Frontend](#frontend-v1)).
+They're independently run and independently versioned; the frontend only
+talks to the backend over HTTP, never by importing it.
+
+Within `backend/`, the project is organized by feature, not by generic
+layers: `tech_detection/`, `url_discovery/`, and `content_extraction/` are
+each self-contained, independent business logic — `website_processing/` sits
+one level up and *composes* two of them (discovery + extraction) without
+owning any HTTP/parsing logic itself. `api/` stays a thin layer that routes
+to whichever feature (or composition) it's exposing, never a dumping ground
+for logic from any of them.
 
 ## How it works
 
@@ -257,58 +263,64 @@ logic itself — just orchestration and status combination.
 
 ```
 web-graph/
-├── api/                       # thin FastAPI layer -- validate, call feature, return
-│   ├── main.py                #   FastAPI() app + /health, includes all four routers
-│   ├── routes/
-│   │   ├── tech_detection.py   #   POST /detect-tech
-│   │   ├── url_discovery.py    #   POST /discover-urls
-│   │   ├── content_extraction.py #  POST /extract-content
-│   │   └── website_processing.py # POST /discover-and-extract
-│   └── schemas/
-│       ├── tech_detection.py   #   request/response models per feature, no logic
-│       ├── url_discovery.py    #   also where production safety caps live
-│       │                        #   (max_pages/max_depth bounds)
-│       ├── content_extraction.py
-│       └── website_processing.py # reuses url_discovery's + content_extraction's
-│                                  # own response models for its nested fields
+├── backend/                   # Python / FastAPI -- everything below is run from here
+│   ├── api/                       # thin FastAPI layer -- validate, call feature, return
+│   │   ├── main.py                #   FastAPI() app + /health, includes all four routers
+│   │   ├── routes/
+│   │   │   ├── tech_detection.py   #   POST /detect-tech
+│   │   │   ├── url_discovery.py    #   POST /discover-urls
+│   │   │   ├── content_extraction.py #  POST /extract-content
+│   │   │   └── website_processing.py # POST /discover-and-extract
+│   │   └── schemas/
+│   │       ├── tech_detection.py   #   request/response models per feature, no logic
+│   │       ├── url_discovery.py    #   also where production safety caps live
+│   │       │                        #   (max_pages/max_depth bounds)
+│   │       ├── content_extraction.py
+│   │       └── website_processing.py # reuses url_discovery's + content_extraction's
+│   │                                  # own response models for its nested fields
+│   │
+│   ├── tech_detection/            # feature 1: all detection business logic
+│   │   ├── pipeline.py             #   orchestrates the two-stage flow end to end
+│   │   ├── fetcher.py               #   HTTP fetching only
+│   │   ├── evidence.py              #   HTML parsing + evidence-dict construction, merge_evidence()
+│   │   ├── browser.py               #   Playwright browser evidence collector
+│   │   ├── fallback.py              #   HTTP-alone-enough? decision
+│   │   ├── engine.py                #   generic fingerprint rule evaluator/scorer
+│   │   ├── fingerprints.py          #   the fingerprint definitions (11 technologies)
+│   │   ├── relationships.py         #   what a direct detection implies (Next.js -> React)
+│   │   └── inference.py             #   applies relationships.py, keeps evidence separate
+│   │
+│   ├── url_discovery/              # feature 2A: crawls a site for its public URLs
+│   │   ├── crawler.py               #   crawl() = BFS traversal engine; discover_urls() =
+│   │   │                             #   feature contract + safety boundary around it
+│   │   ├── fetcher.py               #   browser-shaped session, pacing, 429 retry
+│   │   └── link_extraction.py       #   normalize_url(), extract_links(), extract_canonical()
+│   │
+│   ├── content_extraction/         # feature 2B: pulls title/headings/paragraphs from one URL
+│   │   └── content_extraction.py    #   extract_content() -- single file, single-resource contract
+│   │
+│   ├── website_processing/         # feature 2C: composes 2A + 2B, owns no HTTP/parsing itself
+│   │   └── pipeline.py               #   discover_and_extract() -- combined status derivation
+│   │
+│   ├── cli.py                     # local CLI entry point (prints to terminal)
+│   ├── pyproject.toml             # backend deps + pytest config (uv-managed)
+│   ├── uv.lock
+│   │
+│   ├── tests/
+│   │   ├── api/                    # API-layer tests -- each feature's entry point is mocked
+│   │   ├── tech_detection/         # offline regression suite for the detection logic
+│   │   │   └── network/            #   real-site/real-browser checks (marked, opt-in)
+│   │   ├── url_discovery/          # offline regression suite for the crawler
+│   │   ├── content_extraction/     # offline regression suite for content extraction
+│   │   ├── website_processing/     # offline regression suite for the combined workflow
+│   │   └── fakes.py                # shared FakeResponse/FakeSession test helpers
+│   │
+│   └── testing/                   # manual dev-inspection tools, not regression tests
+│       ├── test.py                 #   dump raw scripts/stylesheets/meta for a URL
+│       └── playwright-test.py       #   standalone Playwright prototype/reference
 │
-├── tech_detection/            # feature 1: all detection business logic
-│   ├── pipeline.py             #   orchestrates the two-stage flow end to end
-│   ├── fetcher.py               #   HTTP fetching only
-│   ├── evidence.py              #   HTML parsing + evidence-dict construction, merge_evidence()
-│   ├── browser.py               #   Playwright browser evidence collector
-│   ├── fallback.py              #   HTTP-alone-enough? decision
-│   ├── engine.py                #   generic fingerprint rule evaluator/scorer
-│   ├── fingerprints.py          #   the fingerprint definitions (11 technologies)
-│   ├── relationships.py         #   what a direct detection implies (Next.js -> React)
-│   └── inference.py             #   applies relationships.py, keeps evidence separate
-│
-├── url_discovery/              # feature 2A: crawls a site for its public URLs
-│   ├── crawler.py               #   crawl() = BFS traversal engine; discover_urls() =
-│   │                             #   feature contract + safety boundary around it
-│   ├── fetcher.py               #   browser-shaped session, pacing, 429 retry
-│   └── link_extraction.py       #   normalize_url(), extract_links(), extract_canonical()
-│
-├── content_extraction/         # feature 2B: pulls title/headings/paragraphs from one URL
-│   └── content_extraction.py    #   extract_content() -- single file, single-resource contract
-│
-├── website_processing/         # feature 2C: composes 2A + 2B, owns no HTTP/parsing itself
-│   └── pipeline.py               #   discover_and_extract() -- combined status derivation
-│
-├── cli.py                     # local CLI entry point (prints to terminal)
-│
-├── tests/
-│   ├── api/                    # API-layer tests -- each feature's entry point is mocked
-│   ├── tech_detection/         # offline regression suite for the detection logic
-│   │   └── network/            #   real-site/real-browser checks (marked, opt-in)
-│   ├── url_discovery/          # offline regression suite for the crawler
-│   ├── content_extraction/     # offline regression suite for content extraction
-│   ├── website_processing/     # offline regression suite for the combined workflow
-│   └── fakes.py                # shared FakeResponse/FakeSession test helpers
-│
-└── testing/                   # manual dev-inspection tools, not regression tests
-    ├── test.py                 #   dump raw scripts/stylesheets/meta for a URL
-    └── playwright-test.py       #   standalone Playwright prototype/reference
+└── frontend/                  # Next.js UI -- see Frontend section below
+    └── src/app/*/page.tsx         # one route per feature, thin client over the API
 ```
 
 `api/` never contains business logic — every route validates the request via a
@@ -328,7 +340,8 @@ inside the crawler itself.
 with one page per feature -- Tech Detection, URL Discovery, Content
 Extraction, Discover + Extract -- plus an overview/landing page. Each page is
 a thin client over the matching API endpoint: a form, a typed fetch call
-(`frontend/src/lib/api.ts`, whose types mirror `api/schemas/*.py` exactly),
+(`frontend/src/lib/api.ts`, whose types mirror `backend/api/schemas/*.py`
+exactly),
 and a result view built from shadcn components (status/confidence badges,
 accordions for evidence and per-page extracted content, tables/lists for
 discovered URLs). It supports light/dark mode and shows a live backend
@@ -337,8 +350,8 @@ health indicator in the header.
 It talks to the backend over plain `fetch` at `NEXT_PUBLIC_API_BASE_URL`
 (defaults to `http://127.0.0.1:8000`, see `frontend/.env.local.example`), so
 the FastAPI app needs `CORSMiddleware` enabled for `localhost:3000` -- see
-`api/main.py`. This is a local-dev CORS policy only, not a deployed-service
-one.
+`backend/api/main.py`. This is a local-dev CORS policy only, not a
+deployed-service one.
 
 **What V1 actually supports:** all four workflows end to end against real
 sites, loading/error states (network failure, validation errors, non-2xx
@@ -353,12 +366,17 @@ a real site instead.
 ## Running it
 
 ```bash
+cd backend
 uv run cli.py                          # CLI: detect technologies on the two live test sites
 uv run uvicorn api.main:app --reload   # API: serve on http://127.0.0.1:8000
 uv run testing/test.py                 # dump raw scripts/stylesheets/meta for a URL
 
-cd frontend && npm run dev             # Frontend: serve on http://localhost:3000
+cd ../frontend && npm run dev          # Frontend: serve on http://localhost:3000
 ```
+
+All `uv run` commands assume `backend/` as the working directory -- that's
+where `pyproject.toml` and `uv.lock` live, so `uv` resolves and runs against
+that virtualenv specifically, not the frontend's Node one.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/detect-tech \
@@ -394,6 +412,7 @@ long time.
 ## Testing
 
 ```bash
+cd backend
 uv run pytest tests/              # fast offline regression suite (no network)
 uv run pytest tests/ -m network   # + real sites and a real Chromium launch
 ```
