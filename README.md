@@ -14,6 +14,7 @@ and extraction together:
 | URL discovery | V1 done | `POST /discover-urls` |
 | Content extraction | V1 done | `POST /extract-content` |
 | Discover + extract (combined) | V1 done | `POST /discover-and-extract` |
+| Frontend (Next.js) | V1 done | `frontend/` -- one page per feature |
 
 "V1 done" means each one works end to end and is regression-tested — not that
 nothing's left. See each feature's own section below for exactly what it does
@@ -321,12 +322,42 @@ production-safety *bounds* on request parameters (e.g. capping `max_pages`),
 which is a request-validation concern and belongs at the API boundary, not
 inside the crawler itself.
 
+## Frontend (V1)
+
+`frontend/` is a Next.js (App Router, TypeScript, Tailwind, shadcn/ui) app
+with one page per feature -- Tech Detection, URL Discovery, Content
+Extraction, Discover + Extract -- plus an overview/landing page. Each page is
+a thin client over the matching API endpoint: a form, a typed fetch call
+(`frontend/src/lib/api.ts`, whose types mirror `api/schemas/*.py` exactly),
+and a result view built from shadcn components (status/confidence badges,
+accordions for evidence and per-page extracted content, tables/lists for
+discovered URLs). It supports light/dark mode and shows a live backend
+health indicator in the header.
+
+It talks to the backend over plain `fetch` at `NEXT_PUBLIC_API_BASE_URL`
+(defaults to `http://127.0.0.1:8000`, see `frontend/.env.local.example`), so
+the FastAPI app needs `CORSMiddleware` enabled for `localhost:3000` -- see
+`api/main.py`. This is a local-dev CORS policy only, not a deployed-service
+one.
+
+**What V1 actually supports:** all four workflows end to end against real
+sites, loading/error states (network failure, validation errors, non-2xx
+responses) surfaced as toasts, and a responsive layout down to phone width.
+
+**What V1 does *not* promise yet:** no auth, no persistence of past
+results (a refresh loses them), no polling/streaming for the slower
+discover-and-extract workflow (the request just blocks until it's done), and
+no automated frontend tests -- it was verified with a live smoke test against
+a real site instead.
+
 ## Running it
 
 ```bash
 uv run cli.py                          # CLI: detect technologies on the two live test sites
 uv run uvicorn api.main:app --reload   # API: serve on http://127.0.0.1:8000
 uv run testing/test.py                 # dump raw scripts/stylesheets/meta for a URL
+
+cd frontend && npm run dev             # Frontend: serve on http://localhost:3000
 ```
 
 ```bash
