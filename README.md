@@ -183,16 +183,42 @@ of this feature:
   filtering. No broader subdomain match is assumed: `blog.site.com` and
   `site.com` are still treated as different sites, since that's genuinely
   ambiguous and a generic crawler shouldn't guess
+- A Playwright browser fallback for JS-rendered links, mirroring
+  `tech_detection`'s HTTP-then-browser split (`url_discovery/browser.py`):
+  per page, not per crawl — a page's raw HTML is checked with the same
+  "visible text length" heuristic `tech_detection/fallback.py` already
+  calibrated (little to no visible text is a proxy for an unrendered app
+  shell), and only pages that trip it get rendered. Unlike `tech_detection`
+  (one page, one possible browser launch), a crawl can visit many pages, so
+  this adds real lifecycle management the single-page version never needed:
+  one Chromium instance launched lazily and reused across every page in the
+  crawl that needs it (not relaunched per page), a hard cap
+  (`MAX_BROWSER_RENDERS_PER_CRAWL = 10`, not caller-configurable in V1) on
+  how many pages get rendered in one crawl, and graceful degradation at two
+  levels — a single page's render failing falls back to that page's raw
+  HTML, and the initial browser launch itself failing disables rendering
+  for the rest of that crawl rather than retrying (and re-failing) on every
+  subsequent page. Verified against a real, locally-served bare SPA shell
+  (`tests/url_discovery/network/`): 1 page found with rendering off, all 3
+  (including two links that exist only after its JS runs) with it on.
+  Real-world finding, documented honestly: today's actual SPA-shell sites
+  almost always carry enough server-rendered chrome (nav/header/footer
+  text) to sit above the heuristic's threshold even when their real content
+  is JS-rendered — a genuinely bare shell is hard to find on the live
+  internet now, which is exactly why the regression test serves its own
+  fixture rather than depending on one
 
 ### What V1 does *not* promise yet
 
 - **Content extraction is a separate feature, not built into this one** —
   `discover_urls()` only returns URLs; reading the content at each one is
   `content_extraction/` (below), wired together by `website_processing/`.
-- **No JavaScript-rendered links** — pure static-HTML `<a href>` parsing, no
-  browser rendering step (unlike `tech_detection`, this feature has no
-  Playwright fallback). Links only added to the DOM by client-side JS will
-  not be discovered.
+- **The browser fallback only catches a fully unrendered shell, not a
+  hybrid page** — real chrome (nav/header/footer) with JS-rendered *main*
+  content sits above the visible-text threshold and never triggers a
+  render, even though its real links are still JS-only. See the supports
+  section above for why this is an inherited, honestly-documented
+  limitation of the heuristic, not new to this feature.
 - **Synchronous only** — a crawl runs inline within one HTTP request; there's
   no background-job/poll pattern yet (see the API section below for why that
   matters for production).

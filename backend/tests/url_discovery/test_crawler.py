@@ -7,10 +7,27 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from url_discovery.crawler import crawl, discover_urls
 from tests.url_discovery.helpers import make_fake_get, make_not_found_response
+
+SHOULD_RENDER_TARGET = "url_discovery.crawler.should_render_with_browser"
+
+
+@pytest.fixture(autouse=True)
+def no_real_browser():
+    # crawl() now decides per-page whether a page looks like an unrendered
+    # SPA shell and is worth a browser render -- every fixture in this file
+    # is tiny HTML, which would trip that heuristic and try to launch a
+    # real Chromium browser during an "offline" test run. Autouse so every
+    # test defaults to "never render," the same way no_real_sleep in
+    # test_content_extraction.py defaults every test out of a real sleep;
+    # TestBrowserFallback overrides this patch locally for the tests that
+    # are actually testing the browser-rendering path itself.
+    with patch(SHOULD_RENDER_TARGET, return_value=False):
+        yield
 
 
 def run(pages, call_log=None, **kwargs):
@@ -774,3 +791,197 @@ class TestWwwIsSameSiteDuringCrawl:
         result = run(pages, start_url="https://example.com/page", max_pages=10, max_depth=0)
 
         assert result["urls"] == ["https://www.example.com/page"]
+
+
+def _mock_playwright(mock_sync_playwright, launch_side_effect=None):
+    """Wires up sync_playwright()'s call chain so crawler.py's
+    `sync_playwright().start()` / `.chromium.launch(headless=True)` /
+    `.close()` / `.stop()` calls all land on inspectable mocks, without a
+    real browser anywhere. Returns (playwright_obj, browser)."""
+    playwright_obj = MagicMock()
+    mock_sync_playwright.return_value.start.return_value = playwright_obj
+
+    browser = MagicMock()
+    if launch_side_effect is not None:
+        playwright_obj.chromium.launch.side_effect = launch_side_effect
+    else:
+        playwright_obj.chromium.launch.return_value = browser
+
+    return playwright_obj, browser
+
+
+class TestBrowserFallback:
+    def test_thin_page_is_rendered_and_its_links_are_discovered(self):
+        # The raw HTML has no links at all (a bare shell); only the
+        # RENDERED html has the real navigation -- proving the fallback
+        # actually contributes links a pure-HTTP crawl would have missed.
+        pages = {
+            "https://example.com/": (
+                "https://example.com/", '<div id="root"></div><script src="/app.js"></script>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+        }
+        fake_get = make_fake_get(pages)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch("url_discovery.crawler.sync_playwright") as mock_sync_playwright, \
+             patch(
+                 "url_discovery.crawler.render_page_html",
+                 return_value='<a href="/a/">A</a>',
+             ):
+            _mock_playwright(mock_sync_playwright)
+            result = crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        assert "https://example.com/a/" in result["urls"]
+
+    def test_browser_is_launched_once_and_reused_across_pages(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/", '<a href="/a/">A</a><a href="/b/">B</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "thin a"),
+            "https://example.com/b/": ("https://example.com/b/", "thin b"),
+        }
+        fake_get = make_fake_get(pages)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch("url_discovery.crawler.sync_playwright") as mock_sync_playwright, \
+             patch("url_discovery.crawler.render_page_html", return_value="<html>rendered</html>"):
+            playwright_obj, _ = _mock_playwright(mock_sync_playwright)
+            crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        assert mock_sync_playwright.call_count == 1
+        assert playwright_obj.chromium.launch.call_count == 1
+
+    def test_render_cap_stops_further_renders_but_not_the_crawl(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/", '<a href="/a/">A</a><a href="/b/">B</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "thin a"),
+            "https://example.com/b/": ("https://example.com/b/", "thin b"),
+        }
+        fake_get = make_fake_get(pages)
+        render_calls = []
+
+        def fake_render(browser, url):
+            # Returns the SAME links the raw HTML already had -- rendering
+            # doesn't change what's discoverable here, it's only being
+            # exercised to prove the render CAP itself, not to add links.
+            render_calls.append(url)
+            return '<a href="/a/">A</a><a href="/b/">B</a>'
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch("url_discovery.crawler.sync_playwright") as mock_sync_playwright, \
+             patch("url_discovery.crawler.render_page_html", side_effect=fake_render), \
+             patch("url_discovery.crawler.MAX_BROWSER_RENDERS_PER_CRAWL", 1):
+            _mock_playwright(mock_sync_playwright)
+            result = crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        # Only the start page (the only one queued before the cap is hit)
+        # gets rendered -- the cap does not stop the crawl itself, just
+        # further rendering; /a/ and /b/ still get traversed on raw HTML.
+        assert len(render_calls) == 1
+        assert result["pages_traversed"] == 3
+
+    def test_render_failure_for_one_page_falls_back_to_raw_html_not_an_error(self):
+        pages = {
+            "https://example.com/": ("https://example.com/", "thin start page"),
+        }
+        fake_get = make_fake_get(pages)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch("url_discovery.crawler.sync_playwright") as mock_sync_playwright, \
+             patch("url_discovery.crawler.render_page_html", side_effect=RuntimeError("page.goto timed out")):
+            _mock_playwright(mock_sync_playwright)
+            result = crawl("https://example.com/", max_pages=10, max_depth=0)
+
+        assert result["urls"] == ["https://example.com/"]
+        assert result["pages_traversed"] == 1
+        assert result["errors"] == []  # a render failure is not a page-fetch error
+
+    def test_launch_failure_disables_browser_for_the_rest_of_the_crawl(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/", '<a href="/a/">A</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "thin a"),
+        }
+        fake_get = make_fake_get(pages)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch("url_discovery.crawler.sync_playwright") as mock_sync_playwright, \
+             patch("url_discovery.crawler.render_page_html") as mock_render:
+            playwright_obj, _ = _mock_playwright(
+                mock_sync_playwright, launch_side_effect=RuntimeError("Executable doesn't exist")
+            )
+            result = crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        # The launch was only attempted once, not once per thin page --
+        # and the crawl still completed on raw HTML for both pages.
+        assert playwright_obj.chromium.launch.call_count == 1
+        mock_render.assert_not_called()
+        assert result["pages_traversed"] == 2
+
+    def test_browser_and_playwright_are_closed_after_the_crawl(self):
+        pages = {
+            "https://example.com/": ("https://example.com/", "thin start page"),
+        }
+        fake_get = make_fake_get(pages)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch("url_discovery.crawler.sync_playwright") as mock_sync_playwright, \
+             patch("url_discovery.crawler.render_page_html", return_value="<html>rendered</html>"):
+            playwright_obj, browser = _mock_playwright(mock_sync_playwright)
+            crawl("https://example.com/", max_pages=10, max_depth=0)
+
+        browser.close.assert_called_once()
+        playwright_obj.stop.assert_called_once()
+
+    def test_canonical_tag_only_present_in_rendered_html_is_honored(self):
+        pages = {
+            "https://example.com/page": ("https://example.com/page", "thin page"),
+        }
+        fake_get = make_fake_get(pages)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch(SHOULD_RENDER_TARGET, return_value=True), \
+             patch("url_discovery.crawler.sync_playwright") as mock_sync_playwright, \
+             patch(
+                 "url_discovery.crawler.render_page_html",
+                 return_value='<link rel="canonical" href="https://example.com/canonical-page">',
+             ):
+            _mock_playwright(mock_sync_playwright)
+            result = crawl("https://example.com/page", max_pages=10, max_depth=0)
+
+        assert result["urls"] == ["https://example.com/canonical-page"]
+
+    def test_a_page_with_enough_visible_text_never_launches_a_browser(self):
+        # Regression: this test does NOT override should_render_with_browser
+        # (autouse patches it to always return False) -- if crawl() ever
+        # called it wrong (e.g. inverted the condition), sync_playwright
+        # would get called here and this assertion would catch it.
+        pages = {
+            "https://example.com/": ("https://example.com/", "<html>plenty of real content</html>"),
+        }
+        fake_get = make_fake_get(pages)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch("url_discovery.crawler.sync_playwright") as mock_sync_playwright:
+            crawl("https://example.com/", max_pages=10, max_depth=0)
+
+        mock_sync_playwright.assert_not_called()
