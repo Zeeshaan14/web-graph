@@ -55,6 +55,14 @@ def make_response(html, status=200, content_type="text/html; charset=utf-8"):
     return response
 
 
+def heading_texts(blocks):
+    return [b["text"] for b in blocks if b["type"] == "heading"]
+
+
+def paragraph_texts(blocks):
+    return [b["text"] for b in blocks if b["type"] == "paragraph"]
+
+
 class TestExtractContentSuccess:
     def test_extracts_title_headings_and_paragraphs(self):
         html = """
@@ -74,16 +82,67 @@ class TestExtractContentSuccess:
         assert result["status"] == "success"
         assert result["url"] == "https://example.com/article"
         assert result["title"] == "My Article"
-        assert result["headings"] == ["Main Heading", "Sub Heading"]
-        assert result["paragraphs"] == ["First paragraph.", "Second paragraph."]
+        assert heading_texts(result["blocks"]) == ["Main Heading", "Sub Heading"]
+        assert paragraph_texts(result["blocks"]) == ["First paragraph.", "Second paragraph."]
         assert result["error"] is None
+
+    def test_headings_and_paragraphs_stay_interleaved_in_document_order(self):
+        # The whole point of the blocks contract: a heading and the
+        # paragraph(s) that followed it in the source stay linked together
+        # in one ordered list, not scattered across two flat arrays.
+        html = """
+        <html><body><article>
+            <h1>First Heading</h1>
+            <p>Paragraph under first heading.</p>
+            <h2>Second Heading</h2>
+            <p>Paragraph under second heading, part one.</p>
+            <p>Paragraph under second heading, part two.</p>
+        </article></body></html>
+        """
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/article")
+
+        assert result["blocks"] == [
+            {"type": "heading", "level": 1, "text": "First Heading"},
+            {"type": "paragraph", "text": "Paragraph under first heading."},
+            {"type": "heading", "level": 2, "text": "Second Heading"},
+            {"type": "paragraph", "text": "Paragraph under second heading, part one."},
+            {"type": "paragraph", "text": "Paragraph under second heading, part two."},
+        ]
+
+    def test_list_items_are_extracted_in_place_alongside_headings_and_paragraphs(self):
+        html = """
+        <html><body><article>
+            <h2>Features</h2>
+            <p>The service includes:</p>
+            <ul>
+                <li>First feature, described in enough detail for trafilatura to keep it.</li>
+                <li>Second feature, also described in enough detail to survive extraction.</li>
+            </ul>
+        </article></body></html>
+        """
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/")
+
+        assert result["blocks"] == [
+            {"type": "heading", "level": 2, "text": "Features"},
+            {"type": "paragraph", "text": "The service includes:"},
+            {
+                "type": "list_item",
+                "text": "First feature, described in enough detail for trafilatura to keep it.",
+            },
+            {
+                "type": "list_item",
+                "text": "Second feature, also described in enough detail to survive extraction.",
+            },
+        ]
 
     def test_falls_back_to_whole_page_when_no_article_or_main(self):
         html = "<html><body><div><p>Just a paragraph.</p></div></body></html>"
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/")
 
-        assert result["paragraphs"] == ["Just a paragraph."]
+        assert paragraph_texts(result["blocks"]) == ["Just a paragraph."]
 
     def test_title_is_none_when_missing(self):
         html = "<html><body><article><p>Text.</p></article></body></html>"
@@ -104,15 +163,15 @@ class TestExtractContentSuccess:
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/")
 
-        assert result["headings"] == []
-        assert result["paragraphs"] == ["Real paragraph."]
+        assert heading_texts(result["blocks"]) == []
+        assert paragraph_texts(result["blocks"]) == ["Real paragraph."]
 
     def test_only_h1_h2_h3_are_collected(self):
         html = "<html><body><article><h1>H1</h1><h4>H4</h4><h2>H2</h2></article></body></html>"
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/")
 
-        assert result["headings"] == ["H1", "H2"]
+        assert heading_texts(result["blocks"]) == ["H1", "H2"]
 
 
 class TestBoilerplateStripping:
@@ -130,7 +189,7 @@ class TestBoilerplateStripping:
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/")
 
-        assert result["paragraphs"] == ["Real content."]
+        assert paragraph_texts(result["blocks"]) == ["Real content."]
 
     def test_boilerplate_disguised_as_a_real_tag_is_still_excluded(self):
         # The actual bug that motivated switching to trafilatura: a real
@@ -172,9 +231,10 @@ class TestBoilerplateStripping:
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/core-web-vitals")
 
-        assert result["headings"] == ["How Core Web Vitals Work"]
-        assert len(result["paragraphs"]) == 2
-        combined = " ".join(result["paragraphs"]).lower()
+        assert heading_texts(result["blocks"]) == ["How Core Web Vitals Work"]
+        paragraphs = paragraph_texts(result["blocks"])
+        assert len(paragraphs) == 2
+        combined = " ".join(paragraphs).lower()
         assert "newsletter" not in combined
         assert "related posts" not in combined
         assert "copyright" not in combined
@@ -189,8 +249,7 @@ class TestFailureHandling:
             "status": "failed",
             "url": "https://example.com/",
             "title": None,
-            "headings": [],
-            "paragraphs": [],
+            "blocks": [],
             "error": "boom",
         }
 
@@ -214,8 +273,7 @@ class TestFailureHandling:
 
         assert result["status"] == "failed"
         assert "image/png" in result["error"]
-        assert result["headings"] == []
-        assert result["paragraphs"] == []
+        assert result["blocks"] == []
 
     def test_content_type_check_is_case_insensitive(self):
         html = "<html><body><article><p>Text.</p></article></body></html>"
@@ -253,7 +311,7 @@ class TestResponseSizeLimit:
 
         assert result["status"] == "failed"
         assert "exceed" in result["error"].lower()
-        assert result["paragraphs"] == []
+        assert result["blocks"] == []
 
     def test_body_within_the_cap_is_parsed_normally(self):
         html = "<html><body><article><p>Small page.</p></article></body></html>"
@@ -261,7 +319,7 @@ class TestResponseSizeLimit:
             result = extract_content("https://example.com/")
 
         assert result["status"] == "success"
-        assert result["paragraphs"] == ["Small page."]
+        assert paragraph_texts(result["blocks"]) == ["Small page."]
 
     def test_malformed_content_length_header_is_ignored_not_fatal(self):
         response = make_response("<html><body><article><p>Fine.</p></article></body></html>")
@@ -270,7 +328,7 @@ class TestResponseSizeLimit:
             result = extract_content("https://example.com/")
 
         assert result["status"] == "success"
-        assert result["paragraphs"] == ["Fine."]
+        assert paragraph_texts(result["blocks"]) == ["Fine."]
 
 
 class TestRequestConfiguration:
@@ -315,7 +373,7 @@ class TestPacingAndRetry:
             result = extract_content("https://example.com/")
 
         assert result["status"] == "success"
-        assert result["paragraphs"] == ["Recovered."]
+        assert paragraph_texts(result["blocks"]) == ["Recovered."]
         assert mock_get.call_count == 2
         assert any(call.args and call.args[0] == 2.0 for call in mock_sleep.call_args_list)
 
@@ -372,8 +430,8 @@ class TestBrowserFallback:
         mock_render.assert_called_once_with("https://example.com/app")
         assert result["status"] == "success"
         assert result["title"] == "Rendered Title"
-        assert result["headings"] == ["Real Heading"]
-        assert result["paragraphs"] == ["Real paragraph that only exists after JS runs."]
+        assert heading_texts(result["blocks"]) == ["Real Heading"]
+        assert paragraph_texts(result["blocks"]) == ["Real paragraph that only exists after JS runs."]
 
     def test_render_failure_falls_back_to_the_raw_html_not_a_failed_result(self):
         shell_html = '<html><head><title>Shell Title</title></head><body><div id="root"></div></body></html>'
@@ -386,7 +444,7 @@ class TestBrowserFallback:
         # just proceeds on it instead of a rendered version.
         assert result["status"] == "success"
         assert result["title"] == "Shell Title"
-        assert result["paragraphs"] == []
+        assert result["blocks"] == []
 
     def test_a_page_with_enough_visible_text_never_launches_a_browser(self):
         # Regression: this test does NOT override should_render_with_browser

@@ -108,6 +108,15 @@ function DiscoverAndExtractForm({
   );
 }
 
+// Same nesting reasoning as content-extraction/page.tsx: this renders
+// inside an accordion item, so page headings sit one level below that.
+const HEADING_TAGS = ["h4", "h5", "h6"] as const;
+const HEADING_CLASSES: Record<number, string> = {
+  1: "mt-3 font-heading text-sm font-semibold tracking-tight first:mt-0",
+  2: "mt-2.5 font-heading text-sm font-semibold tracking-tight first:mt-0",
+  3: "mt-2 text-sm font-semibold text-foreground/90 first:mt-0",
+};
+
 function DiscoverAndExtractPageInner() {
   const searchParams = useSearchParams();
   const [url, setUrl] = useState(() => searchParams.get("url") ?? "");
@@ -258,26 +267,39 @@ function DiscoverAndExtractPageInner() {
                               <AlertDescription>{page.error}</AlertDescription>
                             </Alert>
                           )}
-                          {page.headings.length === 0 && page.paragraphs.length === 0 && !page.error && (
+                          {page.blocks.length === 0 && !page.error && (
                             <p className="text-sm text-muted-foreground">
                               No extractable content was found on this page.
                             </p>
                           )}
-                          <div className="flex max-h-96 flex-col gap-3 overflow-y-auto pr-1">
-                            {page.headings.length > 0 && (
-                              <ul className="flex flex-col gap-1 text-sm">
-                                {page.headings.map((heading, j) => (
-                                  <li key={j} className="font-medium">
-                                    {heading}
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-                            {page.paragraphs.map((paragraph, j) => (
-                              <p key={j} className="text-sm leading-relaxed text-foreground/90">
-                                {paragraph}
-                              </p>
-                            ))}
+                          <div className="flex max-h-96 flex-col overflow-y-auto pr-1">
+                            {page.blocks.map((block, j) => {
+                              if (block.type === "heading") {
+                                const level = block.level ?? 2;
+                                const Tag = HEADING_TAGS[level - 1] ?? "h5";
+                                return (
+                                  <Tag key={j} className={HEADING_CLASSES[level] ?? HEADING_CLASSES[2]}>
+                                    {block.text}
+                                  </Tag>
+                                );
+                              }
+                              if (block.type === "list_item") {
+                                return (
+                                  <p
+                                    key={j}
+                                    className="mt-1.5 flex gap-2.5 pl-0.5 text-sm leading-relaxed text-foreground/90 first:mt-0"
+                                  >
+                                    <span className="mt-[0.55em] size-1 shrink-0 rounded-full bg-muted-foreground" />
+                                    {block.text}
+                                  </p>
+                                );
+                              }
+                              return (
+                                <p key={j} className="mt-2 text-sm leading-relaxed text-foreground/90 first:mt-0">
+                                  {block.text}
+                                </p>
+                              );
+                            })}
                           </div>
                         </AccordionContent>
                       </AccordionItem>

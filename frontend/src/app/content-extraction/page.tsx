@@ -61,6 +61,16 @@ function ContentExtractionForm({
   );
 }
 
+// Content headings (h1-h3 in the source page) render nested one level
+// below our own page structure, since result.title already takes the h2
+// slot -- so h3/h4/h5 here, not h1/h2/h3.
+const HEADING_TAGS = ["h3", "h4", "h5"] as const;
+const HEADING_CLASSES: Record<number, string> = {
+  1: "mt-4 font-heading text-lg font-semibold tracking-tight first:mt-0",
+  2: "mt-3 font-heading text-base font-semibold tracking-tight first:mt-0",
+  3: "mt-2 text-sm font-semibold text-foreground/90 first:mt-0",
+};
+
 function ContentExtractionPageInner() {
   const searchParams = useSearchParams();
   const [url, setUrl] = useState(() => searchParams.get("url") ?? "");
@@ -134,8 +144,17 @@ function ContentExtractionPageInner() {
                     <StatusBadge status={result.status} />
                     {result.status === "success" && (
                       <>
-                        <Badge variant="outline">{result.headings.length} headings</Badge>
-                        <Badge variant="outline">{result.paragraphs.length} paragraphs</Badge>
+                        <Badge variant="outline">
+                          {result.blocks.filter((b) => b.type === "heading").length} headings
+                        </Badge>
+                        <Badge variant="outline">
+                          {result.blocks.filter((b) => b.type === "paragraph").length} paragraphs
+                        </Badge>
+                        {result.blocks.some((b) => b.type === "list_item") && (
+                          <Badge variant="outline">
+                            {result.blocks.filter((b) => b.type === "list_item").length} list items
+                          </Badge>
+                        )}
                       </>
                     )}
                   </div>
@@ -153,42 +172,43 @@ function ContentExtractionPageInner() {
             </Card>
 
             {result.status === "success" &&
-              (result.paragraphs.length > 0 || result.headings.length > 0 ? (
+              (result.blocks.length > 0 ? (
                 <Card className="overflow-hidden">
                   <div className="h-1.5 bg-primary" />
-                  <CardContent className="flex flex-col gap-5 pt-6">
+                  <CardContent className="flex max-h-[42rem] flex-col overflow-y-auto pt-6 pr-1">
                     {result.title && (
                       <h2 className="text-2xl font-semibold tracking-tight text-balance">
                         {result.title}
                       </h2>
                     )}
-                    <div className="flex flex-col gap-5 sm:flex-row sm:gap-8">
-                      {result.headings.length > 0 && (
-                        <nav className="flex shrink-0 flex-col gap-1.5 sm:w-56">
-                          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                            Outline
-                          </h3>
-                          <ul className="flex flex-col gap-1 border-l text-sm">
-                            {result.headings.map((heading, i) => (
-                              <li
-                                key={i}
-                                className="border-l-2 border-transparent py-0.5 pl-3 text-muted-foreground hover:border-primary hover:text-foreground"
-                              >
-                                {heading}
-                              </li>
-                            ))}
-                          </ul>
-                        </nav>
-                      )}
-                      {result.paragraphs.length > 0 && (
-                        <div className="flex max-h-[36rem] flex-1 flex-col gap-4 overflow-y-auto pr-1">
-                          {result.paragraphs.map((paragraph, i) => (
-                            <p key={i} className="text-sm leading-relaxed text-foreground/90">
-                              {paragraph}
+                    <div className="flex flex-col">
+                      {result.blocks.map((block, i) => {
+                        if (block.type === "heading") {
+                          const level = block.level ?? 2;
+                          const Tag = HEADING_TAGS[level - 1] ?? "h4";
+                          return (
+                            <Tag key={i} className={HEADING_CLASSES[level] ?? HEADING_CLASSES[2]}>
+                              {block.text}
+                            </Tag>
+                          );
+                        }
+                        if (block.type === "list_item") {
+                          return (
+                            <p
+                              key={i}
+                              className="mt-1.5 flex gap-2.5 pl-0.5 text-sm leading-relaxed text-foreground/90 first:mt-4"
+                            >
+                              <span className="mt-[0.55em] size-1 shrink-0 rounded-full bg-muted-foreground" />
+                              {block.text}
                             </p>
-                          ))}
-                        </div>
-                      )}
+                          );
+                        }
+                        return (
+                          <p key={i} className="mt-2 text-sm leading-relaxed text-foreground/90 first:mt-4">
+                            {block.text}
+                          </p>
+                        );
+                      })}
                     </div>
                   </CardContent>
                 </Card>

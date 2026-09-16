@@ -59,12 +59,17 @@ export interface DiscoverResponse {
 
 // ---- content_extraction ----------------------------------------------------
 
+export interface ContentBlock {
+  type: "heading" | "paragraph" | "list_item";
+  level: number | null;
+  text: string;
+}
+
 export interface ExtractResponse {
   status: "success" | "failed";
   url: string;
   title: string | null;
-  headings: string[];
-  paragraphs: string[];
+  blocks: ContentBlock[];
   error: string | null;
 }
 

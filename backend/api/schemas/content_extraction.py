@@ -12,10 +12,19 @@ class ExtractRequest(BaseModel):
     url: str
 
 
+class ContentBlock(BaseModel):
+    # "heading", "paragraph", or "list_item" -- kept as an ordered list
+    # rather than separate headings/paragraphs arrays so a heading and the
+    # content that followed it in the source document stay linked together,
+    # in reading order, instead of being collapsed into disconnected lists.
+    type: str
+    level: int | None = None
+    text: str
+
+
 class ExtractResponse(BaseModel):
     status: str
     url: str
     title: str | None
-    headings: list[str]
-    paragraphs: list[str]
+    blocks: list[ContentBlock]
     error: str | None

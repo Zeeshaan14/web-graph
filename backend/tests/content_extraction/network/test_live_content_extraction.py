@@ -64,9 +64,12 @@ def test_bare_spa_shell_content_is_only_found_via_a_real_browser_render(spa_shel
 
     assert result["status"] == "success"
     assert result["title"] == "Real Rendered Title"
-    assert result["headings"] == ["Real Heading From JS"]
-    assert result["paragraphs"] == [
-        "This paragraph only exists after JavaScript runs and populates the DOM."
+    assert result["blocks"] == [
+        {"type": "heading", "level": 1, "text": "Real Heading From JS"},
+        {
+            "type": "paragraph",
+            "text": "This paragraph only exists after JavaScript runs and populates the DOM.",
+        },
     ]
 
 
@@ -78,4 +81,4 @@ def test_lakshx_in_extracts_successfully_with_browser_fallback_wired_in():
 
     assert result["status"] == "success"
     assert result["title"]
-    assert len(result["paragraphs"]) > 0
+    assert any(b["type"] == "paragraph" for b in result["blocks"])

@@ -99,8 +99,7 @@ def _failed(url: str, error: str) -> dict:
         "status": "failed",
         "url": url,
         "title": None,
-        "headings": [],
-        "paragraphs": [],
+        "blocks": [],
         "error": error,
     }
 
@@ -213,27 +212,46 @@ def extract_content(url: str):
             favor_precision=True,
         )
 
-        headings = []
-        paragraphs = []
+        # A single ordered traversal -- not separate main.iter("head") and
+        # main.iter("p") passes -- because trafilatura's XML already gives
+        # us headings and paragraphs as ordered siblings under <main>, in
+        # the same order they appeared in the source document. Two separate
+        # passes would throw that order away and leave no way to tell which
+        # paragraph(s) actually followed which heading.
+        blocks = []
 
         if extracted_xml:
             main = ElementTree.fromstring(extracted_xml).find("main")
             if main is not None:
-                headings = [
-                    _element_text(el)
-                    for el in main.iter("head")
-                    if el.get("rend") in HEADING_LEVELS and _element_text(el)
-                ]
-                paragraphs = [
-                    _element_text(el) for el in main.iter("p") if _element_text(el)
-                ]
+                for el in main.iter():
+                    if el.tag == "head" and el.get("rend") in HEADING_LEVELS:
+                        text = _element_text(el)
+                        if text:
+                            blocks.append({
+                                "type": "heading",
+                                "level": int(el.get("rend")[1]),
+                                "text": text,
+                            })
+                    elif el.tag == "p":
+                        text = _element_text(el)
+                        if text:
+                            blocks.append({"type": "paragraph", "text": text})
+                    elif el.tag == "item":
+                        # A bulleted/numbered list item -- trafilatura wraps
+                        # these as <list><item>...</item></list>, a shape
+                        # the old head/p-only pass silently dropped
+                        # entirely. The enclosing <list> element itself
+                        # isn't handled here (it has no tag match above),
+                        # only its <item> children, so nothing double-counts.
+                        text = _element_text(el)
+                        if text:
+                            blocks.append({"type": "list_item", "text": text})
 
         return {
             "status": "success",
             "url": url,
             "title": title,
-            "headings": headings,
-            "paragraphs": paragraphs,
+            "blocks": blocks,
             "error": None,
         }
 
@@ -253,7 +271,9 @@ if __name__ == "__main__":
         key: (value.encode("ascii", "replace").decode() if isinstance(value, str) else value)
         for key, value in result.items()
     }
-    safe["headings"] = [h.encode("ascii", "replace").decode() for h in result["headings"]]
-    safe["paragraphs"] = [p.encode("ascii", "replace").decode() for p in result["paragraphs"]]
+    safe["blocks"] = [
+        {**block, "text": block["text"].encode("ascii", "replace").decode()}
+        for block in result["blocks"]
+    ]
 
     print(safe)
