@@ -196,12 +196,15 @@ def extract_content(url: str):
         # script/style/nav/footer/aside-stripping logic entirely -- real
         # content-density scoring (link ratio, tag/class signals, DOM
         # structure) instead of "strip this fixed list of tag names and
-        # hope." favor_precision=True is trafilatura's own documented
-        # setting for biasing toward excluding borderline content rather
-        # than maximizing recall -- matches our goal here, though it isn't
-        # what makes the specific newsletter-CTA test below pass (that one
-        # turns out to hold either way; the density scoring itself is
-        # doing the real work there).
+        # hope." favor_recall=True over favor_precision=True: a real user
+        # report (lakshx.in/terms) showed favor_precision dropping an
+        # entire hero section -- eyebrow tag, h1 title, intro paragraph --
+        # as if it were boilerplate chrome, simply because of its position
+        # ahead of the "real" article body. favor_recall keeps that kind of
+        # borderline-but-real content without reopening the disguised-
+        # boilerplate case the newsletter-CTA test below guards against;
+        # that test passes either way, since it's the density scoring
+        # itself (not this flag) doing the real work there.
         extracted_xml = trafilatura.extract(
             html,
             url=url,
@@ -209,7 +212,7 @@ def extract_content(url: str):
             with_metadata=False,
             include_comments=False,
             include_tables=False,
-            favor_precision=True,
+            favor_recall=True,
         )
 
         # A single ordered traversal -- not separate main.iter("head") and

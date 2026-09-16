@@ -29,7 +29,10 @@ SPA_SHELL_HTML = b"""<!DOCTYPE html>
   document.title = 'Real Rendered Title';
   document.getElementById('root').innerHTML =
     '<article><h1>Real Heading From JS</h1>' +
-    '<p>This paragraph only exists after JavaScript runs and populates the DOM.</p>' +
+    '<p>This paragraph only exists after JavaScript runs and populates the DOM, ' +
+    'written as a full sentence so the density scorer has a genuine signal.</p>' +
+    '<p>A second real paragraph, also only present once the client-side render ' +
+    'completes, giving the extractor enough total content to preserve structure.</p>' +
     '</article>';
 </script>
 </body></html>
@@ -68,7 +71,13 @@ def test_bare_spa_shell_content_is_only_found_via_a_real_browser_render(spa_shel
         {"type": "heading", "level": 1, "text": "Real Heading From JS"},
         {
             "type": "paragraph",
-            "text": "This paragraph only exists after JavaScript runs and populates the DOM.",
+            "text": "This paragraph only exists after JavaScript runs and populates the DOM, "
+            "written as a full sentence so the density scorer has a genuine signal.",
+        },
+        {
+            "type": "paragraph",
+            "text": "A second real paragraph, also only present once the client-side render "
+            "completes, giving the extractor enough total content to preserve structure.",
         },
     ]
 

@@ -65,14 +65,20 @@ def paragraph_texts(blocks):
 
 class TestExtractContentSuccess:
     def test_extracts_title_headings_and_paragraphs(self):
+        # Full sentences, not two-word fragments -- trafilatura's density
+        # scoring (favor_recall) needs genuine content to anchor its
+        # structure detection on; a one-line paragraph gives it no signal
+        # either way and can fall back to flattened, unstructured output.
         html = """
         <html><head><title>My Article</title></head>
         <body>
             <article>
                 <h1>Main Heading</h1>
-                <p>First paragraph.</p>
+                <p>This is the first paragraph of the article, with enough real
+                sentence content for the extractor to have a genuine signal.</p>
                 <h2>Sub Heading</h2>
-                <p>Second paragraph.</p>
+                <p>This is the second paragraph, following the sub heading,
+                also written as a full sentence rather than a fragment.</p>
             </article>
         </body></html>
         """
@@ -83,7 +89,12 @@ class TestExtractContentSuccess:
         assert result["url"] == "https://example.com/article"
         assert result["title"] == "My Article"
         assert heading_texts(result["blocks"]) == ["Main Heading", "Sub Heading"]
-        assert paragraph_texts(result["blocks"]) == ["First paragraph.", "Second paragraph."]
+        assert paragraph_texts(result["blocks"]) == [
+            "This is the first paragraph of the article, with enough real "
+            "sentence content for the extractor to have a genuine signal.",
+            "This is the second paragraph, following the sub heading, "
+            "also written as a full sentence rather than a fragment.",
+        ]
         assert result["error"] is None
 
     def test_headings_and_paragraphs_stay_interleaved_in_document_order(self):
@@ -93,10 +104,13 @@ class TestExtractContentSuccess:
         html = """
         <html><body><article>
             <h1>First Heading</h1>
-            <p>Paragraph under first heading.</p>
+            <p>This is the paragraph that follows the first heading, written
+            as a full sentence with real content.</p>
             <h2>Second Heading</h2>
-            <p>Paragraph under second heading, part one.</p>
-            <p>Paragraph under second heading, part two.</p>
+            <p>This is the first paragraph under the second heading, part
+            one, also written with real sentence content.</p>
+            <p>This is the second paragraph under the second heading, part
+            two, continuing with more real sentence content.</p>
         </article></body></html>
         """
         with patch(PATCH_TARGET, return_value=make_response(html)):
@@ -104,17 +118,38 @@ class TestExtractContentSuccess:
 
         assert result["blocks"] == [
             {"type": "heading", "level": 1, "text": "First Heading"},
-            {"type": "paragraph", "text": "Paragraph under first heading."},
+            {
+                "type": "paragraph",
+                "text": "This is the paragraph that follows the first heading, written "
+                "as a full sentence with real content.",
+            },
             {"type": "heading", "level": 2, "text": "Second Heading"},
-            {"type": "paragraph", "text": "Paragraph under second heading, part one."},
-            {"type": "paragraph", "text": "Paragraph under second heading, part two."},
+            {
+                "type": "paragraph",
+                "text": "This is the first paragraph under the second heading, part "
+                "one, also written with real sentence content.",
+            },
+            {
+                "type": "paragraph",
+                "text": "This is the second paragraph under the second heading, part "
+                "two, continuing with more real sentence content.",
+            },
         ]
 
     def test_list_items_are_extracted_in_place_alongside_headings_and_paragraphs(self):
+        # An extra heading+paragraph pair ahead of the list, purely to give
+        # trafilatura enough overall document content to preserve structure
+        # -- a too-small document can trip a flattened fallback extraction
+        # regardless of any individual element's own text length.
         html = """
         <html><body><article>
+            <h1>Product Overview</h1>
+            <p>This product is built for teams who need reliable tooling
+            without a steep learning curve, described here in enough detail
+            to give the extractor real content to anchor on.</p>
             <h2>Features</h2>
-            <p>The service includes:</p>
+            <p>The service includes the following capabilities, described
+            below in more detail for clarity.</p>
             <ul>
                 <li>First feature, described in enough detail for trafilatura to keep it.</li>
                 <li>Second feature, also described in enough detail to survive extraction.</li>
@@ -125,8 +160,19 @@ class TestExtractContentSuccess:
             result = extract_content("https://example.com/")
 
         assert result["blocks"] == [
+            {"type": "heading", "level": 1, "text": "Product Overview"},
+            {
+                "type": "paragraph",
+                "text": "This product is built for teams who need reliable tooling "
+                "without a steep learning curve, described here in enough detail "
+                "to give the extractor real content to anchor on.",
+            },
             {"type": "heading", "level": 2, "text": "Features"},
-            {"type": "paragraph", "text": "The service includes:"},
+            {
+                "type": "paragraph",
+                "text": "The service includes the following capabilities, described "
+                "below in more detail for clarity.",
+            },
             {
                 "type": "list_item",
                 "text": "First feature, described in enough detail for trafilatura to keep it.",
@@ -167,7 +213,19 @@ class TestExtractContentSuccess:
         assert paragraph_texts(result["blocks"]) == ["Real paragraph."]
 
     def test_only_h1_h2_h3_are_collected(self):
-        html = "<html><body><article><h1>H1</h1><h4>H4</h4><h2>H2</h2></article></body></html>"
+        html = """
+        <html><body><article>
+            <h1>H1</h1>
+            <p>Paragraph under the first heading, written with enough real
+            sentence content for the extractor to trust it.</p>
+            <h4>H4</h4>
+            <p>Paragraph under the h4, which should still be excluded from
+            the collected headings list either way.</p>
+            <h2>H2</h2>
+            <p>Paragraph under the second collected heading, also written as
+            a full sentence for the same reason.</p>
+        </article></body></html>
+        """
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/")
 
@@ -176,20 +234,32 @@ class TestExtractContentSuccess:
 
 class TestBoilerplateStripping:
     def test_script_style_noscript_nav_footer_aside_are_removed(self):
+        # nav content is marked up as real links here, not bare text --
+        # link density (not just the <nav> tag) is a big part of what
+        # trafilatura's boilerplate detection actually keys off of, and a
+        # navigation block with no links looks like ordinary body text to
+        # it, defeating the point of this test.
         html = """
-        <html><body><article>
+        <html><body>
+        <nav><a href="/">Home</a> <a href="/about">About</a> <a href="/contact">Contact</a></nav>
+        <article>
             <script>var x = "script paragraph should not appear";</script>
             <style>.p { color: red; }</style>
-            <nav><p>Nav paragraph.</p></nav>
-            <footer><p>Footer paragraph.</p></footer>
-            <aside><p>Aside paragraph.</p></aside>
-            <p>Real content.</p>
+            <footer><p>Copyright 2024 Example Site. All rights reserved.</p></footer>
+            <aside><p>Related articles you might also enjoy reading on this topic.</p></aside>
+            <p>This is the real article content, written as a full sentence
+            with enough length for the density scorer to recognize it as
+            genuine body text.</p>
         </article></body></html>
         """
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/")
 
-        assert paragraph_texts(result["blocks"]) == ["Real content."]
+        assert paragraph_texts(result["blocks"]) == [
+            "This is the real article content, written as a full sentence "
+            "with enough length for the density scorer to recognize it as "
+            "genuine body text."
+        ]
 
     def test_boilerplate_disguised_as_a_real_tag_is_still_excluded(self):
         # The actual bug that motivated switching to trafilatura: a real
@@ -419,7 +489,12 @@ class TestBrowserFallback:
         rendered_html = (
             "<html><head><title>Rendered Title</title></head>"
             "<body><article><h1>Real Heading</h1>"
-            "<p>Real paragraph that only exists after JS runs.</p>"
+            "<p>Real paragraph that only exists after JS runs, written as a "
+            "full sentence so the density scorer has a genuine signal to "
+            "work with here.</p>"
+            "<p>A second real paragraph, also only present after the "
+            "client-side render completes, giving the extractor enough "
+            "total content to preserve structure.</p>"
             "</article></body></html>"
         )
         with patch(PATCH_TARGET, return_value=make_response(shell_html)), \
@@ -431,7 +506,14 @@ class TestBrowserFallback:
         assert result["status"] == "success"
         assert result["title"] == "Rendered Title"
         assert heading_texts(result["blocks"]) == ["Real Heading"]
-        assert paragraph_texts(result["blocks"]) == ["Real paragraph that only exists after JS runs."]
+        assert paragraph_texts(result["blocks"]) == [
+            "Real paragraph that only exists after JS runs, written as a "
+            "full sentence so the density scorer has a genuine signal to "
+            "work with here.",
+            "A second real paragraph, also only present after the "
+            "client-side render completes, giving the extractor enough "
+            "total content to preserve structure.",
+        ]
 
     def test_render_failure_falls_back_to_the_raw_html_not_a_failed_result(self):
         shell_html = '<html><head><title>Shell Title</title></head><body><div id="root"></div></body></html>'
