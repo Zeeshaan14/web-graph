@@ -1,7 +1,8 @@
 "use client";
 
-import { AlertCircle, Loader2, Search, Workflow } from "lucide-react";
-import { useState } from "react";
+import { AlertCircle, CheckCircle2, Loader2, Search, Workflow, XCircle } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -22,25 +23,107 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { EmptyState } from "@/components/empty-state";
+import { PageHero } from "@/components/page-hero";
+import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, discoverAndExtract, type DiscoverAndExtractResponse } from "@/lib/api";
 
-export default function DiscoverAndExtractPage() {
-  const [url, setUrl] = useState("");
+function DiscoverAndExtractForm({
+  url,
+  setUrl,
+  maxPages,
+  setMaxPages,
+  maxDepth,
+  setMaxDepth,
+  loading,
+  onSubmit,
+}: {
+  url: string;
+  setUrl: (value: string) => void;
+  maxPages: string;
+  setMaxPages: (value: string) => void;
+  maxDepth: string;
+  setMaxDepth: (value: string) => void;
+  loading: boolean;
+  onSubmit: (event: React.FormEvent) => void;
+}) {
+  return (
+    <form
+      onSubmit={onSubmit}
+      className="flex w-full max-w-xl flex-col gap-3 rounded-lg border bg-card p-3"
+    >
+      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
+        <div className="flex-1">
+          <Label htmlFor="combo-url" className="sr-only">
+            URL
+          </Label>
+          <Input
+            id="combo-url"
+            type="url"
+            placeholder="https://example.com"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            className="h-10 border-0 bg-transparent shadow-none focus-visible:ring-0"
+            required
+          />
+        </div>
+        <Button type="submit" disabled={loading} className="h-10 gap-2 sm:w-44">
+          {loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
+          {loading ? "Working..." : "Run"}
+        </Button>
+      </div>
+      <div className="flex flex-col gap-3 border-t p-2 pt-3 sm:flex-row">
+        <div className="flex flex-1 items-center gap-2">
+          <Label htmlFor="combo-max-pages" className="whitespace-nowrap text-xs text-muted-foreground">
+            Max pages
+          </Label>
+          <Input
+            id="combo-max-pages"
+            type="number"
+            min={1}
+            max={100}
+            value={maxPages}
+            onChange={(e) => setMaxPages(e.target.value)}
+            className="h-8"
+          />
+        </div>
+        <div className="flex flex-1 items-center gap-2">
+          <Label htmlFor="combo-max-depth" className="whitespace-nowrap text-xs text-muted-foreground">
+            Max depth
+          </Label>
+          <Input
+            id="combo-max-depth"
+            type="number"
+            min={0}
+            max={50}
+            placeholder="unbounded"
+            value={maxDepth}
+            onChange={(e) => setMaxDepth(e.target.value)}
+            className="h-8"
+          />
+        </div>
+      </div>
+    </form>
+  );
+}
+
+function DiscoverAndExtractPageInner() {
+  const searchParams = useSearchParams();
+  const [url, setUrl] = useState(() => searchParams.get("url") ?? "");
   const [maxPages, setMaxPages] = useState("5");
   const [maxDepth, setMaxDepth] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<DiscoverAndExtractResponse | null>(null);
+  const autoRan = useRef(false);
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!url.trim()) return;
-
+  async function runWorkflow(targetUrl: string) {
+    if (!targetUrl.trim()) return;
     setLoading(true);
     setResult(null);
     try {
       const response = await discoverAndExtract(
-        url.trim(),
+        targetUrl.trim(),
         Number(maxPages) || 10,
         maxDepth.trim() === "" ? null : Number(maxDepth)
       );
@@ -52,154 +135,174 @@ export default function DiscoverAndExtractPage() {
     }
   }
 
+  useEffect(() => {
+    if (autoRan.current) return;
+    autoRan.current = true;
+    const paramUrl = searchParams.get("url");
+    if (paramUrl && searchParams.get("run") === "1") {
+      // Safe one-time kick-off, guarded by autoRan above -- not the
+      // derived-state render loop this rule exists to catch.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      runWorkflow(paramUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    runWorkflow(url);
+  }
+
+  const succeeded = result?.pages.filter((p) => p.status === "success").length ?? 0;
+
   return (
-    <div className="flex flex-col gap-8">
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Workflow className="size-6 text-primary" />
-          <h1 className="text-2xl font-semibold tracking-tight">Discover + Extract</h1>
-        </div>
-        <p className="max-w-2xl text-muted-foreground">
-          Runs URL discovery, then extracts content from every discovered
-          page. Extraction runs sequentially per page with no pacing/retry of
-          its own yet, so keep max pages modest on unfamiliar sites.
-        </p>
-      </div>
+    <div className="flex flex-col">
+      <PageHero
+        icon={Workflow}
+        eyebrow="Feature 2C"
+        title="Discover + Extract"
+        description="Runs URL discovery, then extracts content from every discovered page -- up to 5 pages at once, with its own pacing and retry, folded into one combined result."
+      >
+        <DiscoverAndExtractForm
+          url={url}
+          setUrl={setUrl}
+          maxPages={maxPages}
+          setMaxPages={setMaxPages}
+          maxDepth={maxDepth}
+          setMaxDepth={setMaxDepth}
+          loading={loading}
+          onSubmit={handleSubmit}
+        />
+      </PageHero>
 
-      <Card>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="combo-url">URL</Label>
-              <Input
-                id="combo-url"
-                type="url"
-                placeholder="https://example.com"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                required
-              />
-            </div>
-            <div className="flex flex-col gap-4 sm:flex-row">
-              <div className="flex flex-1 flex-col gap-2">
-                <Label htmlFor="combo-max-pages">Max pages (1-100)</Label>
-                <Input
-                  id="combo-max-pages"
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={maxPages}
-                  onChange={(e) => setMaxPages(e.target.value)}
-                />
-              </div>
-              <div className="flex flex-1 flex-col gap-2">
-                <Label htmlFor="combo-max-depth">Max depth (optional, 0-50)</Label>
-                <Input
-                  id="combo-max-depth"
-                  type="number"
-                  min={0}
-                  max={50}
-                  placeholder="unbounded"
-                  value={maxDepth}
-                  onChange={(e) => setMaxDepth(e.target.value)}
-                />
-              </div>
-              <Button type="submit" disabled={loading} className="sm:self-end sm:w-48">
-                {loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
-                {loading ? "Working..." : "Discover + Extract"}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
+      <div className="flex flex-col gap-6 py-8">
+        {loading && <ResultSkeleton />}
 
-      {result && (
-        <div className="flex flex-col gap-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex flex-wrap items-center gap-2">
-                Result for <span className="font-mono text-sm font-normal">{result.start_url}</span>
-              </CardTitle>
-              <CardDescription>
-                <div className="flex flex-wrap items-center gap-2 pt-2">
-                  <StatusBadge status={result.status} />
-                  <Badge variant="outline">
-                    discovery: {result.discovery.status}
-                  </Badge>
-                  <Badge variant="outline">{result.discovery.pages_traversed} pages traversed</Badge>
-                  <Badge variant="outline">{result.pages.length} pages extracted</Badge>
-                </div>
-              </CardDescription>
-            </CardHeader>
-            {result.discovery.errors.length > 0 && (
-              <CardContent className="flex flex-col gap-2">
-                {result.discovery.errors.map((err, i) => (
-                  <Alert variant="destructive" key={i}>
-                    <AlertCircle className="size-4" />
-                    <AlertTitle className="font-mono text-xs">{err.url}</AlertTitle>
-                    <AlertDescription>{err.error}</AlertDescription>
-                  </Alert>
-                ))}
-              </CardContent>
-            )}
-          </Card>
+        {!loading && !result && (
+          <EmptyState
+            icon={Workflow}
+            title="No run yet"
+            description="Enter a URL above to discover a site's pages and extract every one's content in a single pass."
+          />
+        )}
 
-          {result.pages.length > 0 && (
+        {!loading && result && (
+          <div className="flex animate-in fade-in flex-col gap-6 duration-300">
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Pages</CardTitle>
+                <CardTitle className="flex flex-wrap items-center gap-2">
+                  Result for <span className="font-mono text-sm font-normal">{result.start_url}</span>
+                </CardTitle>
+                <CardDescription>
+                  <div className="flex flex-wrap items-center gap-2 pt-2">
+                    <StatusBadge status={result.status} />
+                    <Badge variant="outline">discovery: {result.discovery.status}</Badge>
+                    <Badge variant="outline">{result.discovery.pages_traversed} pages traversed</Badge>
+                    <Badge variant="outline">
+                      {succeeded}/{result.pages.length} extracted successfully
+                    </Badge>
+                  </div>
+                </CardDescription>
               </CardHeader>
-              <CardContent>
-                <Accordion type="single" collapsible className="w-full">
-                  {result.pages.map((page, i) => (
-                    <AccordionItem key={i} value={`page-${i}`}>
-                      <AccordionTrigger className="gap-3 text-sm">
-                        <div className="flex flex-1 flex-wrap items-center gap-2 text-left">
-                          <StatusBadge status={page.status} />
-                          <span className="font-mono text-xs text-muted-foreground sm:text-sm">
-                            {page.url}
-                          </span>
-                          {page.status === "success" && page.title && (
-                            <span className="truncate font-medium">{page.title}</span>
-                          )}
-                        </div>
-                      </AccordionTrigger>
-                      <AccordionContent className="flex flex-col gap-3">
-                        {page.error && (
-                          <Alert variant="destructive">
-                            <AlertCircle className="size-4" />
-                            <AlertDescription>{page.error}</AlertDescription>
-                          </Alert>
-                        )}
-                        {page.headings.length > 0 && (
-                          <ul className="flex flex-col gap-1 text-sm">
-                            {page.headings.map((heading, j) => (
-                              <li key={j} className="font-medium">
-                                {heading}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        {page.paragraphs.slice(0, 3).map((paragraph, j) => (
-                          <p key={j} className="text-sm leading-relaxed text-foreground/90">
-                            {paragraph}
-                          </p>
-                        ))}
-                        {page.paragraphs.length > 3 && (
-                          <p className="text-xs text-muted-foreground">
-                            +{page.paragraphs.length - 3} more paragraph
-                            {page.paragraphs.length - 3 > 1 ? "s" : ""}
-                          </p>
-                        )}
-                      </AccordionContent>
-                    </AccordionItem>
+              {result.pages.length > 0 && (
+                <CardContent>
+                  <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all"
+                      style={{ width: `${(succeeded / result.pages.length) * 100}%` }}
+                    />
+                  </div>
+                </CardContent>
+              )}
+              {result.discovery.errors.length > 0 && (
+                <CardContent className="flex flex-col gap-2">
+                  {result.discovery.errors.map((err, i) => (
+                    <Alert variant="destructive" key={i}>
+                      <AlertCircle className="size-4" />
+                      <AlertTitle className="font-mono text-xs">{err.url}</AlertTitle>
+                      <AlertDescription>{err.error}</AlertDescription>
+                    </Alert>
                   ))}
-                </Accordion>
-              </CardContent>
+                </CardContent>
+              )}
             </Card>
-          )}
-        </div>
-      )}
+
+            {result.pages.length > 0 ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Pages</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <Accordion type="single" collapsible className="w-full">
+                    {result.pages.map((page, i) => (
+                      <AccordionItem key={i} value={`page-${i}`}>
+                        <AccordionTrigger className="gap-3 text-sm">
+                          <div className="flex flex-1 flex-wrap items-center gap-2 text-left">
+                            {page.status === "success" ? (
+                              <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
+                            ) : (
+                              <XCircle className="size-4 shrink-0 text-red-500" />
+                            )}
+                            <span className="font-mono text-xs text-muted-foreground sm:text-sm">
+                              {page.url}
+                            </span>
+                            {page.status === "success" && page.title && (
+                              <span className="truncate font-medium">{page.title}</span>
+                            )}
+                          </div>
+                        </AccordionTrigger>
+                        <AccordionContent className="flex flex-col gap-3">
+                          {page.error && (
+                            <Alert variant="destructive">
+                              <AlertCircle className="size-4" />
+                              <AlertDescription>{page.error}</AlertDescription>
+                            </Alert>
+                          )}
+                          {page.headings.length === 0 && page.paragraphs.length === 0 && !page.error && (
+                            <p className="text-sm text-muted-foreground">
+                              No extractable content was found on this page.
+                            </p>
+                          )}
+                          <div className="flex max-h-96 flex-col gap-3 overflow-y-auto pr-1">
+                            {page.headings.length > 0 && (
+                              <ul className="flex flex-col gap-1 text-sm">
+                                {page.headings.map((heading, j) => (
+                                  <li key={j} className="font-medium">
+                                    {heading}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                            {page.paragraphs.map((paragraph, j) => (
+                              <p key={j} className="text-sm leading-relaxed text-foreground/90">
+                                {paragraph}
+                              </p>
+                            ))}
+                          </div>
+                        </AccordionContent>
+                      </AccordionItem>
+                    ))}
+                  </Accordion>
+                </CardContent>
+              </Card>
+            ) : (
+              <EmptyState
+                icon={Workflow}
+                title="No pages extracted"
+                description="Discovery didn't find any pages to extract content from."
+              />
+            )}
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+export default function DiscoverAndExtractPage() {
+  return (
+    <Suspense>
+      <DiscoverAndExtractPageInner />
+    </Suspense>
   );
 }
