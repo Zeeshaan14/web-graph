@@ -16,6 +16,18 @@ const HEADING_PREFIXES: Record<number, string> = {
   3: "####",
 };
 
+// This text is real extracted page content, not authored Markdown -- a
+// literal "*", "#", or leading "-" in a paragraph (common in real-world
+// text: "*required", "1099-K form", etc.) must NOT be parsed back out as
+// emphasis, a heading, or a list marker once this string is rendered.
+// Escapes the same characters CommonMark treats as syntax, both for the
+// on-page renderer and for the downloaded .md file (which should also
+// read back as the plain text it actually is).
+function escapeMarkdownText(text: string): string {
+  const escaped = text.replace(/([\\`*_[\]])/g, "\\$1");
+  return escaped.replace(/^(\s*)(#{1,6}\s|[-+]\s|>\s|\d+[.)]\s)/, "$1\\$2");
+}
+
 export function blocksToMarkdown(blocks: ContentBlock[]): string {
   const lines: string[] = [];
   let previousType: ContentBlock["type"] | null = null;
@@ -28,13 +40,15 @@ export function blocksToMarkdown(blocks: ContentBlock[]): string {
       lines.push("");
     }
 
+    const text = escapeMarkdownText(block.text);
+
     if (block.type === "heading") {
       const prefix = HEADING_PREFIXES[block.level ?? 2] ?? "###";
-      lines.push(`${prefix} ${block.text}`);
+      lines.push(`${prefix} ${text}`);
     } else if (block.type === "list_item") {
-      lines.push(`- ${block.text}`);
+      lines.push(`- ${text}`);
     } else {
-      lines.push(block.text);
+      lines.push(text);
     }
 
     previousType = block.type;
@@ -44,7 +58,7 @@ export function blocksToMarkdown(blocks: ContentBlock[]): string {
 }
 
 export function extractResponseToMarkdown(result: ExtractResponse): string {
-  const heading = `# ${result.title ?? result.url}`;
+  const heading = `# ${result.title ? escapeMarkdownText(result.title) : result.url}`;
   const source = `*Source: [${result.url}](${result.url})*`;
 
   if (result.status === "failed") {

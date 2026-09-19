@@ -24,11 +24,12 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { EmptyState } from "@/components/empty-state";
+import { MarkdownContent } from "@/components/markdown-content";
 import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, discoverAndExtract, type DiscoverAndExtractResponse } from "@/lib/api";
-import { downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
+import { blocksToMarkdown, downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
 
 function DiscoverAndExtractForm({
   url,
@@ -108,15 +109,6 @@ function DiscoverAndExtractForm({
     </form>
   );
 }
-
-// Same nesting reasoning as content-extraction/page.tsx: this renders
-// inside an accordion item, so page headings sit one level below that.
-const HEADING_TAGS = ["h4", "h5", "h6"] as const;
-const HEADING_CLASSES: Record<number, string> = {
-  1: "mt-3 font-heading text-sm font-semibold tracking-tight first:mt-0",
-  2: "mt-2.5 font-heading text-sm font-semibold tracking-tight first:mt-0",
-  3: "mt-2 text-sm font-semibold text-foreground/90 first:mt-0",
-};
 
 function DiscoverAndExtractPageInner() {
   const searchParams = useSearchParams();
@@ -317,34 +309,8 @@ function DiscoverAndExtractPageInner() {
                               No extractable content was found on this page.
                             </p>
                           )}
-                          <div className="flex max-h-96 flex-col overflow-y-auto pr-1">
-                            {page.blocks.map((block, j) => {
-                              if (block.type === "heading") {
-                                const level = block.level ?? 2;
-                                const Tag = HEADING_TAGS[level - 1] ?? "h5";
-                                return (
-                                  <Tag key={j} className={HEADING_CLASSES[level] ?? HEADING_CLASSES[2]}>
-                                    {block.text}
-                                  </Tag>
-                                );
-                              }
-                              if (block.type === "list_item") {
-                                return (
-                                  <p
-                                    key={j}
-                                    className="mt-1.5 flex gap-2.5 pl-0.5 text-sm leading-relaxed text-foreground/90 first:mt-0"
-                                  >
-                                    <span className="mt-[0.55em] size-1 shrink-0 rounded-full bg-muted-foreground" />
-                                    {block.text}
-                                  </p>
-                                );
-                              }
-                              return (
-                                <p key={j} className="mt-2 text-sm leading-relaxed text-foreground/90 first:mt-0">
-                                  {block.text}
-                                </p>
-                              );
-                            })}
+                          <div className="max-h-96 overflow-y-auto pr-1">
+                            <MarkdownContent markdown={blocksToMarkdown(page.blocks)} variant="accordion" />
                           </div>
                         </AccordionContent>
                       </AccordionItem>

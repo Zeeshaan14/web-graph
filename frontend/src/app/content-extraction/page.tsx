@@ -18,11 +18,12 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { EmptyState } from "@/components/empty-state";
+import { MarkdownContent } from "@/components/markdown-content";
 import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, extractContent, type ExtractResponse } from "@/lib/api";
-import { downloadMarkdown, slugifyUrl } from "@/lib/markdown";
+import { blocksToMarkdown, downloadMarkdown, slugifyUrl } from "@/lib/markdown";
 
 function ContentExtractionForm({
   url,
@@ -61,16 +62,6 @@ function ContentExtractionForm({
     </form>
   );
 }
-
-// Content headings (h1-h3 in the source page) render nested one level
-// below our own page structure, since result.title already takes the h2
-// slot -- so h3/h4/h5 here, not h1/h2/h3.
-const HEADING_TAGS = ["h3", "h4", "h5"] as const;
-const HEADING_CLASSES: Record<number, string> = {
-  1: "mt-4 font-heading text-lg font-semibold tracking-tight first:mt-0",
-  2: "mt-3 font-heading text-base font-semibold tracking-tight first:mt-0",
-  3: "mt-2 text-sm font-semibold text-foreground/90 first:mt-0",
-};
 
 function ContentExtractionPageInner() {
   const searchParams = useSearchParams();
@@ -195,34 +186,8 @@ function ContentExtractionPageInner() {
                         {result.title}
                       </h2>
                     )}
-                    <div className="flex flex-col">
-                      {result.blocks.map((block, i) => {
-                        if (block.type === "heading") {
-                          const level = block.level ?? 2;
-                          const Tag = HEADING_TAGS[level - 1] ?? "h4";
-                          return (
-                            <Tag key={i} className={HEADING_CLASSES[level] ?? HEADING_CLASSES[2]}>
-                              {block.text}
-                            </Tag>
-                          );
-                        }
-                        if (block.type === "list_item") {
-                          return (
-                            <p
-                              key={i}
-                              className="mt-1.5 flex gap-2.5 pl-0.5 text-sm leading-relaxed text-foreground/90 first:mt-4"
-                            >
-                              <span className="mt-[0.55em] size-1 shrink-0 rounded-full bg-muted-foreground" />
-                              {block.text}
-                            </p>
-                          );
-                        }
-                        return (
-                          <p key={i} className="mt-2 text-sm leading-relaxed text-foreground/90 first:mt-4">
-                            {block.text}
-                          </p>
-                        );
-                      })}
+                    <div className="mt-4">
+                      <MarkdownContent markdown={blocksToMarkdown(result.blocks)} variant="card" />
                     </div>
                   </CardContent>
                 </Card>
