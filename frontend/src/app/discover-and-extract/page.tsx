@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, CheckCircle2, Loader2, Search, Workflow, XCircle } from "lucide-react";
+import { AlertCircle, CheckCircle2, Download, Loader2, Search, Workflow, XCircle } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -28,6 +28,7 @@ import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, discoverAndExtract, type DiscoverAndExtractResponse } from "@/lib/api";
+import { downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
 
 function DiscoverAndExtractForm({
   url,
@@ -124,6 +125,7 @@ function DiscoverAndExtractPageInner() {
   const [maxDepth, setMaxDepth] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<DiscoverAndExtractResponse | null>(null);
+  const [zipping, setZipping] = useState(false);
   const autoRan = useRef(false);
 
   async function runWorkflow(targetUrl: string) {
@@ -141,6 +143,35 @@ function DiscoverAndExtractPageInner() {
       toast.error(error instanceof ApiError ? error.message : "Something went wrong.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function downloadZip() {
+    if (!result || result.pages.length === 0) return;
+    setZipping(true);
+    try {
+      const { default: JSZip } = await import("jszip");
+      const zip = new JSZip();
+      const usedNames = new Set<string>();
+
+      for (const page of result.pages) {
+        const baseName = slugifyUrl(page.url);
+        let filename = `${baseName}.md`;
+        let suffix = 2;
+        while (usedNames.has(filename)) {
+          filename = `${baseName}-${suffix}.md`;
+          suffix += 1;
+        }
+        usedNames.add(filename);
+        zip.file(filename, extractResponseToMarkdown(page));
+      }
+
+      const blob = await zip.generateAsync({ type: "blob" });
+      downloadBlob(blob, `${slugifyUrl(result.start_url) || "site"}-extract.zip`);
+    } catch {
+      toast.error("Could not build the .zip file.");
+    } finally {
+      setZipping(false);
     }
   }
 
@@ -238,8 +269,22 @@ function DiscoverAndExtractPageInner() {
 
             {result.pages.length > 0 ? (
               <Card>
-                <CardHeader>
+                <CardHeader className="flex-row items-center justify-between">
                   <CardTitle className="text-base">Pages</CardTitle>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="gap-1.5 text-xs"
+                    disabled={zipping}
+                    onClick={downloadZip}
+                  >
+                    {zipping ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Download className="size-3.5" />
+                    )}
+                    {zipping ? "Zipping..." : "Download .zip"}
+                  </Button>
                 </CardHeader>
                 <CardContent>
                   <Accordion type="single" collapsible className="w-full">

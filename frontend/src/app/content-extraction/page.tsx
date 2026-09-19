@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, FileText, Loader2, ScrollText, Search } from "lucide-react";
+import { AlertCircle, Download, FileText, Loader2, ScrollText, Search } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -22,6 +22,7 @@ import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, extractContent, type ExtractResponse } from "@/lib/api";
+import { downloadMarkdown, slugifyUrl } from "@/lib/markdown";
 
 function ContentExtractionForm({
   url,
@@ -135,30 +136,43 @@ function ContentExtractionPageInner() {
         {!loading && result && (
           <div className="flex animate-in fade-in flex-col gap-6 duration-300">
             <Card>
-              <CardHeader>
-                <CardTitle className="flex flex-wrap items-center gap-2">
-                  Result for <span className="font-mono text-sm font-normal">{result.url}</span>
-                </CardTitle>
-                <CardDescription>
-                  <div className="flex flex-wrap items-center gap-2 pt-2">
-                    <StatusBadge status={result.status} />
-                    {result.status === "success" && (
-                      <>
-                        <Badge variant="outline">
-                          {result.blocks.filter((b) => b.type === "heading").length} headings
-                        </Badge>
-                        <Badge variant="outline">
-                          {result.blocks.filter((b) => b.type === "paragraph").length} paragraphs
-                        </Badge>
-                        {result.blocks.some((b) => b.type === "list_item") && (
+              <CardHeader className="flex-row items-start justify-between gap-3">
+                <div>
+                  <CardTitle className="flex flex-wrap items-center gap-2">
+                    Result for <span className="font-mono text-sm font-normal">{result.url}</span>
+                  </CardTitle>
+                  <CardDescription>
+                    <div className="flex flex-wrap items-center gap-2 pt-2">
+                      <StatusBadge status={result.status} />
+                      {result.status === "success" && (
+                        <>
                           <Badge variant="outline">
-                            {result.blocks.filter((b) => b.type === "list_item").length} list items
+                            {result.blocks.filter((b) => b.type === "heading").length} headings
                           </Badge>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </CardDescription>
+                          <Badge variant="outline">
+                            {result.blocks.filter((b) => b.type === "paragraph").length} paragraphs
+                          </Badge>
+                          {result.blocks.some((b) => b.type === "list_item") && (
+                            <Badge variant="outline">
+                              {result.blocks.filter((b) => b.type === "list_item").length} list items
+                            </Badge>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </CardDescription>
+                </div>
+                {result.status === "success" && result.blocks.length > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 gap-1.5 text-xs"
+                    onClick={() => downloadMarkdown(result, `${slugifyUrl(result.url)}.md`)}
+                  >
+                    <Download className="size-3.5" />
+                    Download .md
+                  </Button>
+                )}
               </CardHeader>
               {result.error && (
                 <CardContent>
