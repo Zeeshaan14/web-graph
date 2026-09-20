@@ -9,11 +9,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from url_discovery.crawler import discover_urls
-from content_extraction.content_extraction import extract_content
+from content_extraction.content_extraction import fetch_and_prepare, render_markdown
+from website_processing.shared_content import find_shared_containers, remove_shared_containers, signature
 
-# A small, fixed ceiling on how many extract_content() calls run at once --
+# A small, fixed ceiling on how many fetch_and_prepare() calls run at once --
 # not "as many as there are pages," since every one of them targets the
-# SAME site the crawl just finished hitting. extract_content() already
+# SAME site the crawl just finished hitting. fetch_and_prepare() already
 # paces and retries each of ITS OWN requests (see content_extraction.py),
 # but that's a per-call guarantee, not an aggregate-rate one: running this
 # many of those calls in parallel means the site sees roughly this many
@@ -39,21 +40,64 @@ def discover_and_extract(
             "start_url": start_url,
             "discovery": discovery_result,
             "pages": [],
+            "shared_content_markdown": "",
         }
 
     urls = discovery_result["discovered_urls"]
 
     if urls:
         # ThreadPoolExecutor.map() is the right tool for bounded-concurrent
-        # I/O-bound work in a synchronous codebase -- extract_content()
+        # I/O-bound work in a synchronous codebase -- fetch_and_prepare()
         # spends nearly all its time blocked on network I/O, so threads
         # (not asyncio, not multiprocessing) give real overlap without a
         # rewrite. map() guarantees the RESULT order matches url order
         # even though the underlying calls can complete in any order.
+        #
+        # fetch_and_prepare() stops short of converting to Markdown on
+        # purpose -- shared nav/sidebar/footer content needs to be found
+        # and stripped from each page's own parsed <body> BEFORE that
+        # page's Markdown gets rendered, not after (there's no structure
+        # left to detect or preserve in flat text).
         with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_EXTRACTIONS, len(urls))) as executor:
-            pages = list(executor.map(extract_content, urls))
+            prepared = list(executor.map(fetch_and_prepare, urls))
     else:
-        pages = []
+        prepared = []
+
+    successful = [page for page in prepared if page["status"] == "success"]
+
+    shared_containers = find_shared_containers([page["body"] for page in successful])
+    shared_signatures = [signature(container) for container in shared_containers]
+
+    # Rendered BEFORE any pruning below -- each representative Tag is a
+    # live reference into one of the pages' own body trees, and that same
+    # page gets pruned in the loop right after this: converting it to
+    # Markdown first avoids handing render_markdown() an already-emptied
+    # (decompose()'d) tag.
+    shared_content_markdown = "\n\n---\n\n".join(
+        render_markdown(container) for container in shared_containers
+    )
+
+    for page in successful:
+        remove_shared_containers(page["body"], shared_signatures)
+
+    pages = [
+        {
+            "status": "success",
+            "url": page["url"],
+            "title": page["title"],
+            "content_markdown": render_markdown(page["body"]),
+            "error": None,
+        }
+        if page["status"] == "success"
+        else {
+            "status": "failed",
+            "url": page["url"],
+            "title": None,
+            "content_markdown": "",
+            "error": page["error"],
+        }
+        for page in prepared
+    ]
 
     # pages is guaranteed non-empty here: discover_urls() only reports
     # "success"/"partial" (never "failed", handled above) when at least
@@ -79,6 +123,7 @@ def discover_and_extract(
         "start_url": start_url,
         "discovery": discovery_result,
         "pages": pages,
+        "shared_content_markdown": shared_content_markdown,
     }
 
 def _safe_for_console(value):

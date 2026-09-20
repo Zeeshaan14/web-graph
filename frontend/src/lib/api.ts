@@ -76,6 +76,10 @@ export interface DiscoverAndExtractResponse {
   start_url: string;
   discovery: DiscoverResponse;
   pages: ExtractResponse[];
+  // Nav/sidebar/footer content observed to repeat across several of this
+  // crawl's own pages, pulled out of each page above and reported once
+  // here instead. Empty string when nothing met that bar.
+  shared_content_markdown: string;
 }
 
 // ---- request plumbing -------------------------------------------------------

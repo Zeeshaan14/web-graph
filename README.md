@@ -329,12 +329,34 @@ logic itself — just orchestration and status combination.
   running `N` of them at once means the site sees roughly `N` requests per
   second, not one. Output order still matches `discovered_urls` order
   regardless of which extraction finishes first
+- Cross-page shared-content dedup (`website_processing/shared_content.py`)
+  — nav bars, sidebars, and footers repeated across a site's own pages are
+  detected and pulled out once, into a new `shared_content_markdown`
+  field, instead of duplicated verbatim on every single page. This exists
+  for feeding a crawl's output into a RAG pipeline, where the same
+  boilerplate chunk showing up in every document is pure noise. Built on
+  an observed-repetition signal, not a per-page guess (the thing
+  Feature 2B's own extraction strategy deliberately moved away from, see
+  above): a `<nav>`/`<aside>`/`<header>`/`<footer>` is only ever removed
+  because it was seen matching on *multiple other pages of the same
+  crawl*, never because of how it looks in isolation. Matching is by link
+  overlap (which places a container points to), not exact HTML/text
+  equality — verified directly against lakshx.in, where the same sidebar
+  is rarely byte-identical across pages (the current page's own entry is
+  usually highlighted differently). A crawl needs at least 2 successfully
+  extracted pages before this runs at all; a single-page crawl is never
+  touched
 - `POST /discover-and-extract`
 
 ### What V1 does *not* promise yet
 
 - Inherits every "not yet" item listed above for discovery and extraction
   individually — this feature doesn't paper over either one's gaps.
+- Shared-content detection only looks at real `<nav>`/`<aside>`/`<header>`/
+  `<footer>` landmark tags, not a link-density guess over arbitrary `<div>`s
+  -- a site whose sidebar is a bare, unmarked `<div>` won't be caught.
+  Deliberate: a link-density heuristic over arbitrary elements is exactly
+  the kind of per-page guessing this project moved away from elsewhere.
 
 ## Folder structure
 

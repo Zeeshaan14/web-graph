@@ -37,6 +37,7 @@ SUCCESS_RESULT = {
             "error": None,
         },
     ],
+    "shared_content_markdown": "",
 }
 
 FAILED_RESULT = {
@@ -50,6 +51,7 @@ FAILED_RESULT = {
         "errors": [{"url": "https://example.com/", "error": "Connection timed out"}],
     },
     "pages": [],
+    "shared_content_markdown": "",
 }
 
 

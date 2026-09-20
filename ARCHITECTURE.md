@@ -252,7 +252,7 @@ markdownify(str(body), heading_style="ATX", bullets="-")  -->  content_markdown
 
 | File | What it does |
 |---|---|
-| `content_extraction.py` | Everything: `_fetch()` (streamed GET with the same politeness-pacing + 429-retry policy as `url_discovery/fetcher.py`, duplicated not imported), `_decode_bounded()` (reads the response in 64 KB chunks, aborting if it exceeds `MAX_RESPONSE_BYTES` = 5 MB — this is why the fetch is `stream=True`: without it the whole body would already be buffered before a size check could do anything), `_resolve_relative_urls()`, and `extract_content(url)`, the single public entry point. |
+| `content_extraction.py` | Everything: `_fetch()` (streamed GET with the same politeness-pacing + 429-retry policy as `url_discovery/fetcher.py`, duplicated not imported), `_decode_bounded()` (reads the response in 64 KB chunks, aborting if it exceeds `MAX_RESPONSE_BYTES` = 5 MB — this is why the fetch is `stream=True`: without it the whole body would already be buffered before a size check could do anything), `_resolve_relative_urls()`, and `extract_content(url)`, the single public entry point for the standalone feature. Internally that's two composable halves, also exported: `fetch_and_prepare(url)` (fetch through resolving relative URLs, stops short of converting to Markdown, hands back the parsed `<body>`) and `render_markdown(body)` (the Markdown conversion alone). `extract_content()` just calls both back-to-back; `website_processing/pipeline.py` calls them separately, with its own cross-page shared-content pass running in between. |
 | `browser.py` | Same two functions as `url_discovery/browser.py` (`should_render_with_browser`, `render_page_html`), but **single-shot** here — this feature only ever handles one URL per call, so there's no lifecycle to manage: launch Chromium, render, close, same shape as `tech_detection/browser.py`. |
 
 **Why `markdownify` (full-page conversion) instead of `trafilatura`
@@ -287,12 +287,17 @@ is scoped to `soup.body` specifically — `markdownify` has no notion of
 ## Feature 2C: `website_processing/` — combined discover + extract
 
 **What it does:** runs URL discovery, then runs content extraction on
-every discovered URL, then derives one combined status. Owns **no** HTTP
-or parsing logic itself — pure orchestration and status combination.
+every discovered URL — with a cross-page pass in between that detects and
+strips nav/sidebar/footer content repeated across the crawl's own pages —
+then derives one combined status. Owns **no** HTTP logic itself, and its
+only DOM-level logic (`shared_content.py`) is specific to *comparing
+already-parsed pages against each other*, not to parsing or fetching any
+one of them.
 
 | File | What it does |
 |---|---|
-| `pipeline.py` | `discover_and_extract(start_url, max_pages, max_depth)`. Calls `discover_urls()`; if that failed outright, short-circuits and returns immediately (no point extracting from zero URLs). Otherwise extracts every discovered URL **concurrently** — up to `MAX_CONCURRENT_EXTRACTIONS` (5) at once via `concurrent.futures.ThreadPoolExecutor` (chosen over `asyncio` specifically because `requests` is a blocking library; threads get real I/O overlap without rewriting the HTTP layer to `httpx`/async). `executor.map()` guarantees the result order matches `discovered_urls` order even though the underlying calls can complete in any order. The concurrency cap is deliberately small and fixed: every extraction targets the *same* site the crawl just hit, and `content_extraction`'s own per-call pacing is a per-call guarantee, not an aggregate-rate one — 5 concurrent calls means the site sees roughly 5 requests/second, not one. |
+| `pipeline.py` | `discover_and_extract(start_url, max_pages, max_depth)`. Calls `discover_urls()`; if that failed outright, short-circuits and returns immediately (no point extracting from zero URLs). Otherwise **prepares** every discovered URL **concurrently** — up to `MAX_CONCURRENT_EXTRACTIONS` (5) at once via `concurrent.futures.ThreadPoolExecutor` (chosen over `asyncio` specifically because `requests` is a blocking library; threads get real I/O overlap without rewriting the HTTP layer to `httpx`/async) — using `content_extraction.fetch_and_prepare()` rather than `extract_content()`: it stops short of converting to Markdown, handing back each page's parsed `<body>` instead. Those bodies go through `shared_content.find_shared_containers()`, matched signatures get stripped from each page via `remove_shared_containers()`, and only *then* does each page (and each detected shared container) get converted to Markdown via `content_extraction.render_markdown()`. `executor.map()` guarantees the result order matches `discovered_urls` order even though the underlying calls can complete in any order. The concurrency cap is deliberately small and fixed: every extraction targets the *same* site the crawl just hit, and `content_extraction`'s own per-call pacing is a per-call guarantee, not an aggregate-rate one — 5 concurrent calls means the site sees roughly 5 requests/second, not one. |
+| `shared_content.py` | `find_shared_containers(bodies)` / `remove_shared_containers(body, signatures)` / `signature(container)`. Looks at every `<nav>`/`<aside>`/`<header>`/`<footer>` tag (`CANDIDATE_TAGS`) across all successfully-prepared pages, fingerprints each by its set of `(link text, href)` pairs (`signature()`), and groups fingerprints by **similarity** (Jaccard overlap ≥ `SIMILARITY_THRESHOLD`, 0.75), not exact equality — verified directly against lakshx.in that real nav/sidebar markup is rarely byte-identical across pages even when it's the same template (the current page's own link is often highlighted differently, or one extra page-specific link like a self-referential title is mixed in). A group counts as "shared" once it's matched on at least `MIN_OCCURRENCES` (2) pages, with `SHARED_CONTENT_THRESHOLD` (a low 0.1) as a secondary floor that only starts to matter on much larger crawls — an absolute minimum, not a percentage of the whole crawl, is what actually holds up in practice: a real site commonly runs several page *templates* at once (marketing/docs/legal sections each composing their header differently, confirmed against lakshx.in), so no single container is likely to hit a high percentage of a mixed-template crawl even when it's genuinely repeated chrome within its own section. |
 
 **The status-combination rule** (the one genuinely tricky piece of logic in
 this file):
@@ -304,7 +309,7 @@ this file):
   a mix of success/failure.
 - `success` — discovery succeeded **and** every extraction succeeded.
 
-**Result contract:** `{status, start_url, discovery: <DiscoverResponse verbatim>, pages: [<ExtractResponse verbatim>]}` — `discovery` and `pages` are the *actual* sub-feature results, not a re-derived summary.
+**Result contract:** `{status, start_url, discovery: <DiscoverResponse verbatim>, pages: [<ExtractResponse verbatim, with shared content already stripped>], shared_content_markdown: str}` — `discovery` and each page are the *actual* sub-feature results (minus whatever got detected as shared), not a re-derived summary. `shared_content_markdown` is `""` when nothing met the repetition bar (including every single-page crawl, which never runs this pass at all).
 
 ---
 

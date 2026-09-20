@@ -144,7 +144,20 @@ def _resolve_relative_urls(soup: BeautifulSoup, base_url: str) -> None:
         tag["src"] = urljoin(base_url, tag["src"])
 
 
-def extract_content(url: str):
+def fetch_and_prepare(url: str) -> dict:
+    """Everything extract_content() does up to (not including) the actual
+    HTML-to-Markdown conversion -- fetch, browser-fallback, title, and a
+    parsed <body> with relative URLs already resolved to absolute. Split
+    out from extract_content() so website_processing's crawl workflow can
+    compare pages' HTML *before* any of them get converted to Markdown --
+    once a page's own nav/sidebar is flattened into text, there's no DOM
+    structure left to detect it repeating across pages by, or to preserve
+    if it does.
+
+    Returns {"status": "success", "url", "title", "body": Tag, "error": None}
+    or {"status": "failed", "url", "title": None, "body": None, "error": str}
+    -- the same fields _failed()/extract_content() use, with "body" instead
+    of "content_markdown" swapped in."""
     try:
         response = _fetch(url)
         response.raise_for_status()
@@ -152,13 +165,13 @@ def extract_content(url: str):
         content_type = response.headers.get("content-type", "")
 
         if "text/html" not in content_type.lower():
-            return _failed(url, f"Response is not HTML: {content_type or 'unknown content type'}")
+            return _prepare_failed(url, f"Response is not HTML: {content_type or 'unknown content type'}")
 
         content_length = response.headers.get("content-length")
         if content_length is not None:
             try:
                 if int(content_length) > MAX_RESPONSE_BYTES:
-                    return _failed(
+                    return _prepare_failed(
                         url,
                         f"Response too large: {content_length} bytes exceeds "
                         f"{MAX_RESPONSE_BYTES}-byte limit",
@@ -168,7 +181,7 @@ def extract_content(url: str):
 
         html = _decode_bounded(response, MAX_RESPONSE_BYTES)
         if html is None:
-            return _failed(url, f"Response exceeded {MAX_RESPONSE_BYTES}-byte limit while downloading")
+            return _prepare_failed(url, f"Response exceeded {MAX_RESPONSE_BYTES}-byte limit while downloading")
 
         # If the raw HTML looks like an unrendered app shell, replace it
         # with a browser-rendered version before extracting ANYTHING from
@@ -190,52 +203,71 @@ def extract_content(url: str):
         soup = BeautifulSoup(html, "html.parser")
         title = soup.title.get_text(" ", strip=True) if soup.title else None
 
-        # Full-page conversion, not density-scored "main content" picking:
-        # a real user comparison against another tool's output showed ours
-        # (previously trafilatura, boilerplate-stripped by design) silently
-        # dropping nav links, a hero image, and footer links that the user
-        # wanted kept. markdownify converts the whole body's HTML structure
-        # directly -- headings, bold/italic/links, lists, images -- with no
-        # judgment call about what counts as "real" content; <script> and
-        # <style> text is already excluded by markdownify itself, so
-        # nothing further needs stripping first.
-        #
         # Scoped to <body> specifically, not the whole document: markdownify
-        # has no notion of <head> being non-content, so <title> text would
-        # otherwise leak into the output too, duplicating `title` above.
+        # (used later, in render_markdown()) has no notion of <head> being
+        # non-content, so <title> text would otherwise leak into the
+        # output too, duplicating `title` above.
         body = soup.body or soup
         _resolve_relative_urls(body, url)
 
-        content_markdown = markdownify(
-            str(body),
-            heading_style="ATX",
-            bullets="-",
-        ).strip()
-
-        # Collapse markdownify's occasional runs of 3+ blank lines (e.g.
-        # around stripped script/style tags) down to one, same as a
-        # Markdown renderer would treat them anyway -- purely cosmetic,
-        # doesn't change what content survived.
-        content_markdown = re.sub(r"\n{3,}", "\n\n", content_markdown)
-
-        # Adjacent nav/footer links are commonly spaced only via CSS (a
-        # flexbox gap), with no actual whitespace text node between the
-        # <a> tags in the DOM -- faithfully converted, that leaves
-        # "[Docs](...)[Changelog](...)" with no separator at all. A single
-        # space between two back-to-back links reads correctly without
-        # having to guess at the source page's visual layout.
-        content_markdown = re.sub(r"\)\[", ") [", content_markdown)
-
-        return {
-            "status": "success",
-            "url": url,
-            "title": title,
-            "content_markdown": content_markdown,
-            "error": None,
-        }
+        return {"status": "success", "url": url, "title": title, "body": body, "error": None}
 
     except requests.RequestException as exc:
-        return _failed(url, str(exc))
+        return _prepare_failed(url, str(exc))
+
+
+def _prepare_failed(url: str, error: str) -> dict:
+    return {"status": "failed", "url": url, "title": None, "body": None, "error": error}
+
+
+def render_markdown(body) -> str:
+    """The other half of the old extract_content(): a parsed <body> (with
+    relative URLs already resolved) in, a Markdown string out. Full-page
+    conversion, not density-scored "main content" picking -- a real user
+    comparison against another tool's output showed ours (previously
+    trafilatura, boilerplate-stripped by design) silently dropping nav
+    links, a hero image, and footer links that the user wanted kept.
+    markdownify converts the whole body's HTML structure directly --
+    headings, bold/italic/links, lists, images -- with no judgment call
+    about what counts as "real" content; <script> and <style> text is
+    already excluded by markdownify itself, so nothing further needs
+    stripping first."""
+    content_markdown = markdownify(
+        str(body),
+        heading_style="ATX",
+        bullets="-",
+    ).strip()
+
+    # Collapse markdownify's occasional runs of 3+ blank lines (e.g.
+    # around stripped script/style tags) down to one, same as a
+    # Markdown renderer would treat them anyway -- purely cosmetic,
+    # doesn't change what content survived.
+    content_markdown = re.sub(r"\n{3,}", "\n\n", content_markdown)
+
+    # Adjacent nav/footer links are commonly spaced only via CSS (a
+    # flexbox gap), with no actual whitespace text node between the
+    # <a> tags in the DOM -- faithfully converted, that leaves
+    # "[Docs](...)[Changelog](...)" with no separator at all. A single
+    # space between two back-to-back links reads correctly without
+    # having to guess at the source page's visual layout.
+    content_markdown = re.sub(r"\)\[", ") [", content_markdown)
+
+    return content_markdown
+
+
+def extract_content(url: str) -> dict:
+    prepared = fetch_and_prepare(url)
+
+    if prepared["status"] == "failed":
+        return _failed(prepared["url"], prepared["error"])
+
+    return {
+        "status": "success",
+        "url": prepared["url"],
+        "title": prepared["title"],
+        "content_markdown": render_markdown(prepared["body"]),
+        "error": None,
+    }
 
 
 if __name__ == "__main__":

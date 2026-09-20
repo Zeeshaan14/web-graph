@@ -159,6 +159,10 @@ function DiscoverAndExtractPageInner() {
         zip.file(filename, extractResponseToMarkdown(page));
       }
 
+      if (result.shared_content_markdown.trim()) {
+        zip.file("_shared.md", result.shared_content_markdown);
+      }
+
       const blob = await zip.generateAsync({ type: "blob" });
       downloadBlob(blob, `${slugifyUrl(result.start_url) || "site"}-extract.zip`);
     } catch {
@@ -194,7 +198,7 @@ function DiscoverAndExtractPageInner() {
         icon={Workflow}
         eyebrow="Feature 2C"
         title="Discover + Extract"
-        description="Runs URL discovery, then extracts content from every discovered page -- up to 5 pages at once, with its own pacing and retry, folded into one combined result."
+        description="Runs URL discovery, then extracts content from every discovered page -- up to 5 pages at once, with its own pacing and retry, folded into one combined result. Nav/sidebar/footer content repeated across pages is deduplicated and reported once."
       >
         <DiscoverAndExtractForm
           url={url}
@@ -259,6 +263,37 @@ function DiscoverAndExtractPageInner() {
                 </CardContent>
               )}
             </Card>
+
+            {result.shared_content_markdown.trim() && (
+              <Card className="overflow-hidden">
+                <div className="h-1.5 bg-muted-foreground/40" />
+                <CardHeader>
+                  <CardTitle className="text-base">Shared across pages</CardTitle>
+                  <CardDescription>
+                    Nav, sidebar, or footer content repeated on several crawled pages -- pulled out
+                    once here instead of duplicated in every page below.
+                  </CardDescription>
+                </CardHeader>
+                <Tabs defaultValue="preview" className="gap-0">
+                  <div className="border-b px-4 pt-1">
+                    <TabsList variant="line">
+                      <TabsTrigger value="preview">Preview</TabsTrigger>
+                      <TabsTrigger value="markdown">Markdown</TabsTrigger>
+                    </TabsList>
+                  </div>
+                  <TabsContent value="preview" className="m-0">
+                    <CardContent className="max-h-96 overflow-y-auto pt-4 pr-1">
+                      <MarkdownContent markdown={result.shared_content_markdown} variant="card" />
+                    </CardContent>
+                  </TabsContent>
+                  <TabsContent value="markdown" className="m-0">
+                    <CardContent className="max-h-96 overflow-y-auto pt-4 pr-1">
+                      <RawMarkdown markdown={result.shared_content_markdown} />
+                    </CardContent>
+                  </TabsContent>
+                </Tabs>
+              </Card>
+            )}
 
             {result.pages.length > 0 ? (
               <Card>

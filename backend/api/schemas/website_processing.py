@@ -26,3 +26,8 @@ class DiscoverAndExtractResponse(BaseModel):
     start_url: str
     discovery: DiscoverResponse
     pages: list[ExtractResponse]
+    # Nav/sidebar/footer content observed to repeat across several of this
+    # crawl's own pages -- pulled out of each page above and reported here
+    # once instead. Empty string when nothing met that bar (a 1-page
+    # crawl, or a site with no consistently-repeated chrome).
+    shared_content_markdown: str

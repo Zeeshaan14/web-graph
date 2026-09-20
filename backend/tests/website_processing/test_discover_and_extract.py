@@ -1,17 +1,22 @@
 # Regression suite for website_processing/pipeline.py: the combined
 # status-derivation logic and orchestration. Fully offline -- both
-# discover_urls() and extract_content() are mocked entirely, so this
+# discover_urls() and fetch_and_prepare() are mocked entirely, so this
 # never exercises real crawling/extraction/HTTP (that's each feature's
-# own suite's job).
+# own suite's job). Shared-content detection itself is exercised for real
+# here (not mocked) since it's pipeline.py's own orchestration wiring that
+# this file is about -- see test_shared_content.py for the algorithm's own
+# dedicated unit tests.
 
 import threading
 import time
 from unittest.mock import patch
 
+from bs4 import BeautifulSoup
+
 from website_processing.pipeline import MAX_CONCURRENT_EXTRACTIONS, discover_and_extract
 
 DISCOVER_TARGET = "website_processing.pipeline.discover_urls"
-EXTRACT_TARGET = "website_processing.pipeline.extract_content"
+EXTRACT_TARGET = "website_processing.pipeline.fetch_and_prepare"
 
 
 def discovery(status, urls, errors=None):
@@ -24,14 +29,19 @@ def discovery(status, urls, errors=None):
     }
 
 
-def page(status, url="https://example.com/p", error=None):
-    return {
-        "status": status,
-        "url": url,
-        "title": "Title" if status == "success" else None,
-        "content_markdown": "P" if status == "success" else "",
-        "error": error,
-    }
+def make_body(inner_html: str) -> BeautifulSoup:
+    return BeautifulSoup(f"<html><body>{inner_html}</body></html>", "html.parser").body
+
+
+def page(status, url="https://example.com/p", error=None, body_html="<p>P</p>"):
+    # A plain, link-free paragraph by default -- shared-content detection
+    # only ever looks at nav/aside/header/footer tags (see
+    # shared_content.CANDIDATE_TAGS), so ordinary fixture content like
+    # this is never a dedup candidate, even if several test pages happen
+    # to use the exact same default body_html.
+    if status == "success":
+        return {"status": "success", "url": url, "title": "Title", "body": make_body(body_html), "error": None}
+    return {"status": "failed", "url": url, "title": None, "body": None, "error": error}
 
 
 def run(discovery_result, page_results, **kwargs):
@@ -54,6 +64,7 @@ class TestDiscoveryFailedShortCircuit:
             "start_url": "https://example.com/",
             "discovery": disc,
             "pages": [],
+            "shared_content_markdown": "",
         }
 
 
@@ -101,9 +112,9 @@ class TestOrchestration:
     def test_extract_content_called_once_per_discovered_url(self):
         # NOT asserting CALL order here -- extractions now run concurrently
         # (see TestParallelExtraction below), so which of several worker
-        # threads calls extract_content() first is not deterministic. What
-        # IS guaranteed, and what matters, is that each URL is extracted
-        # exactly once; output ORDER is covered separately below.
+        # threads calls fetch_and_prepare() first is not deterministic.
+        # What IS guaranteed, and what matters, is that each URL is
+        # extracted exactly once; output ORDER is covered separately below.
         disc = discovery("success", ["https://example.com/a", "https://example.com/b"])
         with patch(DISCOVER_TARGET, return_value=disc), \
              patch(EXTRACT_TARGET, side_effect=lambda url: page("success", url=url)) as mock_extract:
@@ -136,15 +147,85 @@ class TestOrchestration:
         # executor.map()'s output order matching input order is exactly
         # the guarantee this test exists to prove.
         disc = discovery("success", ["a", "b"])
-        page_a = page("success", url="https://example.com/a")
-        page_b = page("failed", url="https://example.com/b", error="404")
-        results_by_url = {"a": page_a, "b": page_b}
+        results_by_url = {
+            "a": page("success", url="https://example.com/a", body_html="<p>A content</p>"),
+            "b": page("failed", url="https://example.com/b", error="404"),
+        }
 
         with patch(DISCOVER_TARGET, return_value=disc), \
              patch(EXTRACT_TARGET, side_effect=lambda url: results_by_url[url]):
             result = discover_and_extract("https://example.com/")
 
-        assert result["pages"] == [page_a, page_b]
+        assert result["pages"] == [
+            {
+                "status": "success",
+                "url": "https://example.com/a",
+                "title": "Title",
+                "content_markdown": "A content",
+                "error": None,
+            },
+            {
+                "status": "failed",
+                "url": "https://example.com/b",
+                "title": None,
+                "content_markdown": "",
+                "error": "404",
+            },
+        ]
+
+
+class TestSharedContentWiring:
+    """pipeline.py's own use of shared_content.find_shared_containers() /
+    remove_shared_containers() -- the dedup algorithm's own behavior
+    (thresholds, similarity matching, ...) has its dedicated unit tests in
+    test_shared_content.py. This is about wiring: does the pipeline
+    actually strip what's found, report it once, and leave genuinely
+    unique per-page content alone."""
+
+    # Absolute hrefs -- real fetch_and_prepare() output always is (it
+    # resolves relative URLs itself), and this test mocks that function
+    # out entirely, so nothing else would resolve a relative one here.
+    NAV = '<nav><a href="https://example.com/">Home</a><a href="https://example.com/docs">Docs</a></nav>'
+
+    def test_content_repeated_across_pages_is_stripped_and_reported_once(self):
+        disc = discovery("success", ["a", "b", "c"])
+        pages = [
+            page("success", url="https://example.com/a", body_html=f"{self.NAV}<p>Page A body.</p>"),
+            page("success", url="https://example.com/b", body_html=f"{self.NAV}<p>Page B body.</p>"),
+            page("success", url="https://example.com/c", body_html=f"{self.NAV}<p>Page C body.</p>"),
+        ]
+
+        with patch(DISCOVER_TARGET, return_value=disc), patch(EXTRACT_TARGET, side_effect=pages):
+            result = discover_and_extract("https://example.com/")
+
+        for extracted_page, label in zip(result["pages"], ["A", "B", "C"]):
+            assert "[Home]" not in extracted_page["content_markdown"]
+            assert f"Page {label} body." in extracted_page["content_markdown"]
+
+        assert "[Home](https://example.com/)" in result["shared_content_markdown"]
+        assert "[Docs](https://example.com/docs)" in result["shared_content_markdown"]
+
+    def test_content_unique_to_one_page_is_left_alone(self):
+        disc = discovery("success", ["a", "b"])
+        pages = [
+            page("success", url="https://example.com/a", body_html='<nav><a href="/x">X</a><a href="/y">Y</a></nav>'),
+            page("success", url="https://example.com/b", body_html="<p>Nothing nav-like here.</p>"),
+        ]
+
+        with patch(DISCOVER_TARGET, return_value=disc), patch(EXTRACT_TARGET, side_effect=pages):
+            result = discover_and_extract("https://example.com/")
+
+        assert "[X]" in result["pages"][0]["content_markdown"]
+        assert result["shared_content_markdown"] == ""
+
+    def test_a_single_successful_page_never_triggers_dedup(self):
+        disc = discovery("success", ["a"])
+        with patch(DISCOVER_TARGET, return_value=disc), \
+             patch(EXTRACT_TARGET, return_value=page("success", body_html=self.NAV)):
+            result = discover_and_extract("https://example.com/")
+
+        assert "[Home]" in result["pages"][0]["content_markdown"]
+        assert result["shared_content_markdown"] == ""
 
 
 class TestParallelExtraction:
