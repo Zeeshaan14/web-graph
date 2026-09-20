@@ -143,3 +143,14 @@ export function MarkdownContent({
     </div>
   );
 }
+
+// The raw Markdown source itself -- the "code" side of a Preview/Markdown
+// toggle, showing exactly what MarkdownContent renders (and what gets
+// downloaded) as plain, unrendered text.
+export function RawMarkdown({ markdown }: { markdown: string }) {
+  return (
+    <pre className="overflow-x-auto font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground/90">
+      {markdown}
+    </pre>
+  );
+}

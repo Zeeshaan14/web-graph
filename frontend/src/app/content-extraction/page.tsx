@@ -18,12 +18,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { EmptyState } from "@/components/empty-state";
-import { MarkdownContent } from "@/components/markdown-content";
+import { MarkdownContent, RawMarkdown } from "@/components/markdown-content";
 import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApiError, extractContent, type ExtractResponse } from "@/lib/api";
-import { downloadMarkdown, slugifyUrl } from "@/lib/markdown";
+import { downloadMarkdown, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
 
 function wordCount(markdown: string): number {
   const trimmed = markdown.trim();
@@ -173,16 +174,31 @@ function ContentExtractionPageInner() {
               (result.content_markdown.trim() ? (
                 <Card className="overflow-hidden">
                   <div className="h-1.5 bg-primary" />
-                  <CardContent className="flex max-h-[42rem] flex-col overflow-y-auto pt-6 pr-1">
-                    {result.title && (
-                      <h2 className="text-2xl font-semibold tracking-tight text-balance">
-                        {result.title}
-                      </h2>
-                    )}
-                    <div className="mt-4">
-                      <MarkdownContent markdown={result.content_markdown} variant="card" />
+                  <Tabs defaultValue="preview" className="gap-0">
+                    <div className="border-b px-4 pt-3">
+                      <TabsList variant="line">
+                        <TabsTrigger value="preview">Preview</TabsTrigger>
+                        <TabsTrigger value="markdown">Markdown</TabsTrigger>
+                      </TabsList>
                     </div>
-                  </CardContent>
+                    <TabsContent value="preview" className="m-0">
+                      <CardContent className="flex max-h-[42rem] flex-col overflow-y-auto pt-6 pr-1">
+                        {result.title && (
+                          <h2 className="text-2xl font-semibold tracking-tight text-balance">
+                            {result.title}
+                          </h2>
+                        )}
+                        <div className="mt-4">
+                          <MarkdownContent markdown={result.content_markdown} variant="card" />
+                        </div>
+                      </CardContent>
+                    </TabsContent>
+                    <TabsContent value="markdown" className="m-0">
+                      <CardContent className="max-h-[42rem] overflow-y-auto pt-6 pr-1">
+                        <RawMarkdown markdown={extractResponseToMarkdown(result)} />
+                      </CardContent>
+                    </TabsContent>
+                  </Tabs>
                 </Card>
               ) : (
                 <EmptyState

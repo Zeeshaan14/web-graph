@@ -24,10 +24,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { EmptyState } from "@/components/empty-state";
-import { MarkdownContent } from "@/components/markdown-content";
+import { MarkdownContent, RawMarkdown } from "@/components/markdown-content";
 import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApiError, discoverAndExtract, type DiscoverAndExtractResponse } from "@/lib/api";
 import { downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
 
@@ -309,9 +310,28 @@ function DiscoverAndExtractPageInner() {
                               No extractable content was found on this page.
                             </p>
                           )}
-                          <div className="max-h-96 overflow-y-auto pr-1">
-                            <MarkdownContent markdown={page.content_markdown} variant="accordion" />
-                          </div>
+                          {page.content_markdown.trim() && (
+                            <Tabs defaultValue="preview" className="gap-2">
+                              <TabsList variant="line" className="h-7">
+                                <TabsTrigger value="preview" className="text-xs">
+                                  Preview
+                                </TabsTrigger>
+                                <TabsTrigger value="markdown" className="text-xs">
+                                  Markdown
+                                </TabsTrigger>
+                              </TabsList>
+                              <TabsContent value="preview" className="m-0">
+                                <div className="max-h-96 overflow-y-auto pr-1">
+                                  <MarkdownContent markdown={page.content_markdown} variant="accordion" />
+                                </div>
+                              </TabsContent>
+                              <TabsContent value="markdown" className="m-0">
+                                <div className="max-h-96 overflow-y-auto pr-1">
+                                  <RawMarkdown markdown={extractResponseToMarkdown(page)} />
+                                </div>
+                              </TabsContent>
+                            </Tabs>
+                          )}
                         </AccordionContent>
                       </AccordionItem>
                     ))}
