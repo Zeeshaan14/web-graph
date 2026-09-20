@@ -283,21 +283,31 @@ function DiscoverAndExtractPageInner() {
                   <Accordion type="single" collapsible className="w-full">
                     {result.pages.map((page, i) => (
                       <AccordionItem key={i} value={`page-${i}`}>
-                        <AccordionTrigger className="gap-3 text-sm">
-                          <div className="flex flex-1 flex-wrap items-center gap-2 text-left">
-                            {page.status === "success" ? (
-                              <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
-                            ) : (
-                              <XCircle className="size-4 shrink-0 text-red-500" />
-                            )}
-                            <span className="font-mono text-xs text-muted-foreground sm:text-sm">
-                              {page.url}
-                            </span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {page.status === "success" ? (
+                            <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
+                          ) : (
+                            <XCircle className="size-4 shrink-0 text-red-500" />
+                          )}
+                          {/* A real <a>, not nested inside the accordion's own
+                              <button> (invalid HTML) -- a sibling that opens
+                              the page in a new tab, independent of expanding
+                              the accordion item below it. */}
+                          <a
+                            href={page.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="shrink-0 font-mono text-xs text-muted-foreground hover:text-foreground hover:underline sm:text-sm"
+                          >
+                            {page.url}
+                          </a>
+                          <AccordionTrigger className="gap-3 text-sm">
                             {page.status === "success" && page.title && (
-                              <span className="truncate font-medium">{page.title}</span>
+                              <span className="truncate text-left font-medium">{page.title}</span>
                             )}
-                          </div>
-                        </AccordionTrigger>
+                          </AccordionTrigger>
+                        </div>
                         <AccordionContent className="flex flex-col gap-3">
                           {page.error && (
                             <Alert variant="destructive">
