@@ -1,8 +1,8 @@
 # Tests the API layer only: request validation and response passthrough.
 # Mocks extract_content() entirely -- this file must NOT exercise real
-# HTML-parsing/boilerplate-stripping logic (that's content_extraction's
-# own suite's job). If these tests need to know about article/main
-# fallback behavior to pass, business logic leaked into the API layer.
+# HTML-to-Markdown conversion logic (that's content_extraction's own
+# suite's job). If these tests need to know about that conversion to
+# pass, business logic leaked into the API layer.
 
 from unittest.mock import patch
 
@@ -16,12 +16,7 @@ SUCCESS_RESULT = {
     "status": "success",
     "url": "https://example.com/article",
     "title": "An Article",
-    "blocks": [
-        {"type": "heading", "level": 1, "text": "Intro"},
-        {"type": "paragraph", "level": None, "text": "First paragraph."},
-        {"type": "heading", "level": 2, "text": "Conclusion"},
-        {"type": "paragraph", "level": None, "text": "Second paragraph."},
-    ],
+    "content_markdown": "# Intro\n\nFirst paragraph.\n\n## Conclusion\n\nSecond paragraph.",
     "error": None,
 }
 
@@ -29,7 +24,7 @@ FAILED_RESULT = {
     "status": "failed",
     "url": "https://example.com/missing",
     "title": None,
-    "blocks": [],
+    "content_markdown": "",
     "error": "404 Client Error",
 }
 
@@ -46,7 +41,7 @@ class TestExtractContentRoute:
         body = response.json()
         assert body["status"] == "success"
         assert body["title"] == "An Article"
-        assert body["blocks"] == SUCCESS_RESULT["blocks"]
+        assert body["content_markdown"] == SUCCESS_RESULT["content_markdown"]
 
     def test_passes_through_a_failed_result_as_200_not_500(self):
         # A "failed" extraction (404, non-HTML, connection error) is a
@@ -58,7 +53,7 @@ class TestExtractContentRoute:
         body = response.json()
         assert body["status"] == "failed"
         assert body["error"] == "404 Client Error"
-        assert body["blocks"] == []
+        assert body["content_markdown"] == ""
 
     def test_missing_url_field_is_rejected_before_extract_content_is_called(self):
         with patch("api.routes.content_extraction.extract_content") as mock_extract:
@@ -67,9 +62,9 @@ class TestExtractContentRoute:
         mock_extract.assert_not_called()
         assert response.status_code == 422
 
-    def test_route_does_not_alter_blocks(self):
+    def test_route_does_not_alter_content_markdown(self):
         with patch("api.routes.content_extraction.extract_content", return_value=SUCCESS_RESULT):
             response = client.post("/extract-content", json={"url": "https://example.com/article"})
 
         body = response.json()
-        assert body["blocks"] == SUCCESS_RESULT["blocks"]
+        assert body["content_markdown"] == SUCCESS_RESULT["content_markdown"]

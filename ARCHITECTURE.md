@@ -78,7 +78,7 @@ own comments each time it happens, not an oversight.
 
 | File | What it does |
 |---|---|
-| `backend/pyproject.toml` | Dependencies (`requests`, `beautifulsoup4`, `playwright`, `trafilatura`, `fastapi`, `uvicorn`) + pytest config. `addopts = "-m 'not network'"` excludes real-network tests by default. |
+| `backend/pyproject.toml` | Dependencies (`requests`, `beautifulsoup4`, `playwright`, `markdownify`, `fastapi`, `uvicorn`) + pytest config. `addopts = "-m 'not network'"` excludes real-network tests by default. |
 | `backend/uv.lock` | Locked dependency versions (uv-managed). |
 | `backend/conftest.py` | Empty except a comment — its mere presence (with no `__init__.py` anywhere in `tests/`) makes pytest add the repo root to `sys.path`, so every test file can import feature packages regardless of which subfolder it's in. |
 | `backend/cli.py` | A 3-line manual smoke test: runs `detect_website_technologies()` against two real sites and pretty-prints the result. Not a real CLI tool, just a quick way to eyeball output during development. |
@@ -215,9 +215,10 @@ is declared — deliberately scoped to one non-index sitemap file, not a
 
 ## Feature 2B: `content_extraction/` — pull one page's content
 
-**What it does:** given a URL, fetches it and returns its title, headings
-(h1–h3), and paragraph text — with real boilerplate removal, not just a
-fixed list of tags to strip.
+**What it does:** given a URL, fetches it and converts its whole `<body>`
+to Markdown — headings, links, images, bold/italic, lists, nav and footer
+included. Not density-scored "main content" picking; a direct structural
+conversion of whatever was actually on the page.
 
 **The pipeline (all in one file, `content_extraction.py`):**
 
@@ -237,52 +238,49 @@ should_render_with_browser(html)?  --- yes --->  render_page_html(url), replace 
 soup.title  -->  title
    |
    v
-trafilatura.extract(html, favor_precision=True, output_format="xml")
+soup.body (falls back to the whole soup if there's no <body>)
    |
    v
-parse the small XML result with ElementTree  -->  headings, paragraphs
+_resolve_relative_urls(body, url)   -- <a href>/<img src> rewritten to absolute
    |
    v
-{status, url, title, headings, paragraphs, error}
+markdownify(str(body), heading_style="ATX", bullets="-")  -->  content_markdown
+   |
+   v
+{status, url, title, content_markdown, error}
 ```
 
 | File | What it does |
 |---|---|
-| `content_extraction.py` | Everything: `_fetch()` (streamed GET with the same politeness-pacing + 429-retry policy as `url_discovery/fetcher.py`, duplicated not imported), `_decode_bounded()` (reads the response in 64 KB chunks, aborting if it exceeds `MAX_RESPONSE_BYTES` = 5 MB — this is why the fetch is `stream=True`: without it the whole body would already be buffered before a size check could do anything), and `extract_content(url)`, the single public entry point. |
+| `content_extraction.py` | Everything: `_fetch()` (streamed GET with the same politeness-pacing + 429-retry policy as `url_discovery/fetcher.py`, duplicated not imported), `_decode_bounded()` (reads the response in 64 KB chunks, aborting if it exceeds `MAX_RESPONSE_BYTES` = 5 MB — this is why the fetch is `stream=True`: without it the whole body would already be buffered before a size check could do anything), `_resolve_relative_urls()`, and `extract_content(url)`, the single public entry point. |
 | `browser.py` | Same two functions as `url_discovery/browser.py` (`should_render_with_browser`, `render_page_html`), but **single-shot** here — this feature only ever handles one URL per call, so there's no lifecycle to manage: launch Chromium, render, close, same shape as `tech_detection/browser.py`. |
 
-**Why `trafilatura` instead of a hand-rolled tag search:** an earlier
-version picked `<article>` (or `<main>`, or the whole page) and stripped a
-fixed list of tags (`script`/`style`/`nav`/`footer`/`aside`). That missed
-boilerplate that *looks* like content but isn't tagged as such — e.g. a
-real bug found in development: a newsletter signup CTA in a
-`<div class="...aside...">` (not an actual `<aside>` element) survived
-extraction because nothing in a fixed tag list could catch it.
-`trafilatura` does real content-density scoring (link ratio, tag/class
-signals, DOM structure) instead, and correctly excludes that exact pattern.
-Its XML output (`<head rend="h1|h2|h3">` for headings, `<p>` for
-paragraphs, already boilerplate-stripped) is parsed with the stdlib's
-`xml.etree.ElementTree` — the same tool this project already uses for
-`sitemap.xml` parsing in `url_discovery`.
+**Why `markdownify` (full-page conversion) instead of `trafilatura`
+(boilerplate-stripped "article" extraction):** an earlier version used
+`trafilatura`'s content-density scoring to pick out just the "main"
+article content, deliberately dropping nav/footer/aside as boilerplate.
+That was itself a fix for an even earlier hand-rolled tag-search version
+that missed disguised boilerplate (a newsletter CTA in a `<div
+class="...aside...">`, not a real `<aside>` element). But a direct
+comparison against another extraction tool's output on the same page
+showed the `trafilatura` approach silently dropping content a caller
+reasonably expects back when they ask to extract a page — its own nav
+links, a hero image, footer links. `markdownify` converts the whole
+`<body>`'s DOM structure directly, with no judgment call about what
+counts as "real" content; `<script>`/`<style>` text is already excluded
+by `markdownify` itself (it's code, not content), so nothing further
+needs stripping first. This trades away the "no boilerplate" property
+entirely, on purpose — see `README.md`'s Feature 2B section.
 
-**Known, documented trade-off:** trafilatura is tuned for articles/prose,
-not link-grid index pages. A documentation *landing* page that's mostly
-short link+blurb cards under-extracts (it correctly reads the link-heavy
-layout as navigation-like), while genuine prose pages on the same site
-extract comparably to or better than the old approach did. Not currently
-worked around — see `README.md`'s Feature 2B section for the full reasoning
-on why a "fall back when extraction looks thin" fix turned out to be
-riskier than it first looked (it could reopen the exact newsletter-CTA bug
-on normal article pages).
-
-**Why title extraction stays separate from trafilatura:** `soup.title` is
-read from whichever HTML ends up in play (raw, or rendered if the browser
-fallback triggered) — trafilatura's own metadata extraction was
-deliberately not used for this, since title was never the problem the
-Smashing Magazine bug was about, and keeping it independent is simpler.
+**Why title extraction stays separate from the body conversion:**
+`soup.title` is read from whichever HTML ends up in play (raw, or
+rendered if the browser fallback triggered), and the Markdown conversion
+is scoped to `soup.body` specifically — `markdownify` has no notion of
+`<head>` being non-content, so converting the whole document would leak
+`<title>` text into `content_markdown` too, duplicating `title` above.
 
 **Result contract (single-resource, not a batch — no `"partial"` state):**
-`{status: "success"|"failed", url, title: str|None, headings: [str], paragraphs: [str], error: str|None}`.
+`{status: "success"|"failed", url, title: str|None, content_markdown: str, error: str|None}`.
 
 ---
 

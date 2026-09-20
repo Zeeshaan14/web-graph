@@ -26,20 +26,14 @@ SUCCESS_RESULT = {
             "status": "success",
             "url": "https://example.com/",
             "title": "Home",
-            "blocks": [
-                {"type": "heading", "level": 1, "text": "Welcome"},
-                {"type": "paragraph", "level": None, "text": "Hello."},
-            ],
+            "content_markdown": "# Welcome\n\nHello.",
             "error": None,
         },
         {
             "status": "success",
             "url": "https://example.com/about/",
             "title": "About",
-            "blocks": [
-                {"type": "heading", "level": 1, "text": "About Us"},
-                {"type": "paragraph", "level": None, "text": "We do things."},
-            ],
+            "content_markdown": "# About Us\n\nWe do things.",
             "error": None,
         },
     ],

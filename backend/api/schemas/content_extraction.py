@@ -12,19 +12,12 @@ class ExtractRequest(BaseModel):
     url: str
 
 
-class ContentBlock(BaseModel):
-    # "heading", "paragraph", or "list_item" -- kept as an ordered list
-    # rather than separate headings/paragraphs arrays so a heading and the
-    # content that followed it in the source document stay linked together,
-    # in reading order, instead of being collapsed into disconnected lists.
-    type: str
-    level: int | None = None
-    text: str
-
-
 class ExtractResponse(BaseModel):
     status: str
     url: str
     title: str | None
-    blocks: list[ContentBlock]
+    # The page's full body converted to Markdown -- not a boilerplate-
+    # stripped "main content" pick. Headings, links, images, bold/italic,
+    # nav and footer links: whatever was in <body>, in document order.
+    content_markdown: str
     error: str | None

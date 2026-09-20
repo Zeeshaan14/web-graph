@@ -23,7 +23,12 @@ import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, extractContent, type ExtractResponse } from "@/lib/api";
-import { blocksToMarkdown, downloadMarkdown, slugifyUrl } from "@/lib/markdown";
+import { downloadMarkdown, slugifyUrl } from "@/lib/markdown";
+
+function wordCount(markdown: string): number {
+  const trimmed = markdown.trim();
+  return trimmed ? trimmed.split(/\s+/).length : 0;
+}
 
 function ContentExtractionForm({
   url,
@@ -108,7 +113,7 @@ function ContentExtractionPageInner() {
         icon={FileText}
         eyebrow="Feature 2B"
         title="Content Extraction"
-        description="Fetches a single URL and pulls its title, headings, and paragraphs -- real content-density scoring (via trafilatura) instead of a fixed tag list, with a JS-rendered page fallback for SPA shells."
+        description="Fetches a single URL and converts its full page -- headings, links, images, lists, nav and footer included -- straight to Markdown, with a JS-rendered page fallback for SPA shells."
       >
         <ContentExtractionForm url={url} setUrl={setUrl} loading={loading} onSubmit={handleSubmit} />
       </PageHero>
@@ -135,25 +140,13 @@ function ContentExtractionPageInner() {
                   <CardDescription>
                     <div className="flex flex-wrap items-center gap-2 pt-2">
                       <StatusBadge status={result.status} />
-                      {result.status === "success" && (
-                        <>
-                          <Badge variant="outline">
-                            {result.blocks.filter((b) => b.type === "heading").length} headings
-                          </Badge>
-                          <Badge variant="outline">
-                            {result.blocks.filter((b) => b.type === "paragraph").length} paragraphs
-                          </Badge>
-                          {result.blocks.some((b) => b.type === "list_item") && (
-                            <Badge variant="outline">
-                              {result.blocks.filter((b) => b.type === "list_item").length} list items
-                            </Badge>
-                          )}
-                        </>
+                      {result.status === "success" && result.content_markdown.trim() && (
+                        <Badge variant="outline">{wordCount(result.content_markdown)} words</Badge>
                       )}
                     </div>
                   </CardDescription>
                 </div>
-                {result.status === "success" && result.blocks.length > 0 && (
+                {result.status === "success" && result.content_markdown.trim() && (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -177,7 +170,7 @@ function ContentExtractionPageInner() {
             </Card>
 
             {result.status === "success" &&
-              (result.blocks.length > 0 ? (
+              (result.content_markdown.trim() ? (
                 <Card className="overflow-hidden">
                   <div className="h-1.5 bg-primary" />
                   <CardContent className="flex max-h-[42rem] flex-col overflow-y-auto pt-6 pr-1">
@@ -187,15 +180,15 @@ function ContentExtractionPageInner() {
                       </h2>
                     )}
                     <div className="mt-4">
-                      <MarkdownContent markdown={blocksToMarkdown(result.blocks)} variant="card" />
+                      <MarkdownContent markdown={result.content_markdown} variant="card" />
                     </div>
                   </CardContent>
                 </Card>
               ) : (
                 <EmptyState
                   icon={ScrollText}
-                  title="No paragraph text found"
-                  description="The page was fetched successfully, but no extractable article content was found on it."
+                  title="No content found"
+                  description="The page was fetched successfully, but its body had no extractable content."
                 />
               ))}
           </div>

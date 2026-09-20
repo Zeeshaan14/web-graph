@@ -29,7 +29,7 @@ import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, discoverAndExtract, type DiscoverAndExtractResponse } from "@/lib/api";
-import { blocksToMarkdown, downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
+import { downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
 
 function DiscoverAndExtractForm({
   url,
@@ -304,13 +304,13 @@ function DiscoverAndExtractPageInner() {
                               <AlertDescription>{page.error}</AlertDescription>
                             </Alert>
                           )}
-                          {page.blocks.length === 0 && !page.error && (
+                          {!page.content_markdown.trim() && !page.error && (
                             <p className="text-sm text-muted-foreground">
                               No extractable content was found on this page.
                             </p>
                           )}
                           <div className="max-h-96 overflow-y-auto pr-1">
-                            <MarkdownContent markdown={blocksToMarkdown(page.blocks)} variant="accordion" />
+                            <MarkdownContent markdown={page.content_markdown} variant="accordion" />
                           </div>
                         </AccordionContent>
                       </AccordionItem>

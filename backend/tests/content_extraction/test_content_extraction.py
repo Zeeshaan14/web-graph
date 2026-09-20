@@ -21,7 +21,7 @@ SHOULD_RENDER_TARGET = "content_extraction.content_extraction.should_render_with
 
 @pytest.fixture(autouse=True)
 def no_real_sleep():
-    # extract_content() now paces every fetch with a real time.sleep() --
+    # extract_content() paces every fetch with a real time.sleep() --
     # autouse so every test in this file gets that mocked out without
     # having to say so itself; tests that care about the sleep CALLS
     # (TestPacingAndRetry) request their own patch on the same target,
@@ -32,7 +32,7 @@ def no_real_sleep():
 
 @pytest.fixture(autouse=True)
 def no_real_browser():
-    # extract_content() now decides whether the fetched HTML looks like an
+    # extract_content() decides whether the fetched HTML looks like an
     # unrendered SPA shell and is worth a browser render -- every fixture
     # in this file is tiny HTML, which would trip that heuristic and try
     # to launch a real Chromium browser during an "offline" test run.
@@ -55,30 +55,16 @@ def make_response(html, status=200, content_type="text/html; charset=utf-8"):
     return response
 
 
-def heading_texts(blocks):
-    return [b["text"] for b in blocks if b["type"] == "heading"]
-
-
-def paragraph_texts(blocks):
-    return [b["text"] for b in blocks if b["type"] == "paragraph"]
-
-
 class TestExtractContentSuccess:
-    def test_extracts_title_headings_and_paragraphs(self):
-        # Full sentences, not two-word fragments -- trafilatura's density
-        # scoring (favor_recall) needs genuine content to anchor its
-        # structure detection on; a one-line paragraph gives it no signal
-        # either way and can fall back to flattened, unstructured output.
+    def test_extracts_title_and_full_body_as_markdown(self):
         html = """
         <html><head><title>My Article</title></head>
         <body>
             <article>
                 <h1>Main Heading</h1>
-                <p>This is the first paragraph of the article, with enough real
-                sentence content for the extractor to have a genuine signal.</p>
+                <p>First paragraph.</p>
                 <h2>Sub Heading</h2>
-                <p>This is the second paragraph, following the sub heading,
-                also written as a full sentence rather than a fragment.</p>
+                <p>Second paragraph.</p>
             </article>
         </body></html>
         """
@@ -88,107 +74,13 @@ class TestExtractContentSuccess:
         assert result["status"] == "success"
         assert result["url"] == "https://example.com/article"
         assert result["title"] == "My Article"
-        assert heading_texts(result["blocks"]) == ["Main Heading", "Sub Heading"]
-        assert paragraph_texts(result["blocks"]) == [
-            "This is the first paragraph of the article, with enough real "
-            "sentence content for the extractor to have a genuine signal.",
-            "This is the second paragraph, following the sub heading, "
-            "also written as a full sentence rather than a fragment.",
-        ]
+        assert result["content_markdown"] == (
+            "# Main Heading\n\n"
+            "First paragraph.\n\n"
+            "## Sub Heading\n\n"
+            "Second paragraph."
+        )
         assert result["error"] is None
-
-    def test_headings_and_paragraphs_stay_interleaved_in_document_order(self):
-        # The whole point of the blocks contract: a heading and the
-        # paragraph(s) that followed it in the source stay linked together
-        # in one ordered list, not scattered across two flat arrays.
-        html = """
-        <html><body><article>
-            <h1>First Heading</h1>
-            <p>This is the paragraph that follows the first heading, written
-            as a full sentence with real content.</p>
-            <h2>Second Heading</h2>
-            <p>This is the first paragraph under the second heading, part
-            one, also written with real sentence content.</p>
-            <p>This is the second paragraph under the second heading, part
-            two, continuing with more real sentence content.</p>
-        </article></body></html>
-        """
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/article")
-
-        assert result["blocks"] == [
-            {"type": "heading", "level": 1, "text": "First Heading"},
-            {
-                "type": "paragraph",
-                "text": "This is the paragraph that follows the first heading, written "
-                "as a full sentence with real content.",
-            },
-            {"type": "heading", "level": 2, "text": "Second Heading"},
-            {
-                "type": "paragraph",
-                "text": "This is the first paragraph under the second heading, part "
-                "one, also written with real sentence content.",
-            },
-            {
-                "type": "paragraph",
-                "text": "This is the second paragraph under the second heading, part "
-                "two, continuing with more real sentence content.",
-            },
-        ]
-
-    def test_list_items_are_extracted_in_place_alongside_headings_and_paragraphs(self):
-        # An extra heading+paragraph pair ahead of the list, purely to give
-        # trafilatura enough overall document content to preserve structure
-        # -- a too-small document can trip a flattened fallback extraction
-        # regardless of any individual element's own text length.
-        html = """
-        <html><body><article>
-            <h1>Product Overview</h1>
-            <p>This product is built for teams who need reliable tooling
-            without a steep learning curve, described here in enough detail
-            to give the extractor real content to anchor on.</p>
-            <h2>Features</h2>
-            <p>The service includes the following capabilities, described
-            below in more detail for clarity.</p>
-            <ul>
-                <li>First feature, described in enough detail for trafilatura to keep it.</li>
-                <li>Second feature, also described in enough detail to survive extraction.</li>
-            </ul>
-        </article></body></html>
-        """
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
-
-        assert result["blocks"] == [
-            {"type": "heading", "level": 1, "text": "Product Overview"},
-            {
-                "type": "paragraph",
-                "text": "This product is built for teams who need reliable tooling "
-                "without a steep learning curve, described here in enough detail "
-                "to give the extractor real content to anchor on.",
-            },
-            {"type": "heading", "level": 2, "text": "Features"},
-            {
-                "type": "paragraph",
-                "text": "The service includes the following capabilities, described "
-                "below in more detail for clarity.",
-            },
-            {
-                "type": "list_item",
-                "text": "First feature, described in enough detail for trafilatura to keep it.",
-            },
-            {
-                "type": "list_item",
-                "text": "Second feature, also described in enough detail to survive extraction.",
-            },
-        ]
-
-    def test_falls_back_to_whole_page_when_no_article_or_main(self):
-        html = "<html><body><div><p>Just a paragraph.</p></div></body></html>"
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
-
-        assert paragraph_texts(result["blocks"]) == ["Just a paragraph."]
 
     def test_title_is_none_when_missing(self):
         html = "<html><body><article><p>Text.</p></article></body></html>"
@@ -197,117 +89,102 @@ class TestExtractContentSuccess:
 
         assert result["title"] is None
 
-    def test_empty_and_whitespace_only_tags_are_excluded(self):
-        html = """
-        <html><body><article>
-            <h2></h2>
-            <h2>   </h2>
-            <p></p>
-            <p>Real paragraph.</p>
-        </article></body></html>
-        """
+    def test_title_tag_text_does_not_leak_into_content_markdown(self):
+        # markdownify has no notion of <head> being non-content -- scoping
+        # the conversion to <body> is what keeps <title> from appearing a
+        # second time inside content_markdown, duplicating `title` above.
+        html = "<html><head><title>Page Title</title></head><body><p>Body text.</p></body></html>"
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/")
 
-        assert heading_texts(result["blocks"]) == []
-        assert paragraph_texts(result["blocks"]) == ["Real paragraph."]
+        assert result["title"] == "Page Title"
+        assert "Page Title" not in result["content_markdown"]
+        assert result["content_markdown"] == "Body text."
 
-    def test_only_h1_h2_h3_are_collected(self):
-        html = """
-        <html><body><article>
-            <h1>H1</h1>
-            <p>Paragraph under the first heading, written with enough real
-            sentence content for the extractor to trust it.</p>
-            <h4>H4</h4>
-            <p>Paragraph under the h4, which should still be excluded from
-            the collected headings list either way.</p>
-            <h2>H2</h2>
-            <p>Paragraph under the second collected heading, also written as
-            a full sentence for the same reason.</p>
-        </article></body></html>
-        """
-        with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/")
-
-        assert heading_texts(result["blocks"]) == ["H1", "H2"]
-
-
-class TestBoilerplateStripping:
-    def test_script_style_noscript_nav_footer_aside_are_removed(self):
-        # nav content is marked up as real links here, not bare text --
-        # link density (not just the <nav> tag) is a big part of what
-        # trafilatura's boilerplate detection actually keys off of, and a
-        # navigation block with no links looks like ordinary body text to
-        # it, defeating the point of this test.
+    def test_inline_formatting_and_links_are_preserved(self):
+        # The actual point of moving off a plain-text extractor: bold,
+        # italic, and links used to be flattened to plain text entirely.
         html = """
         <html><body>
-        <nav><a href="/">Home</a> <a href="/about">About</a> <a href="/contact">Contact</a></nav>
-        <article>
-            <script>var x = "script paragraph should not appear";</script>
-            <style>.p { color: red; }</style>
-            <footer><p>Copyright 2024 Example Site. All rights reserved.</p></footer>
-            <aside><p>Related articles you might also enjoy reading on this topic.</p></aside>
-            <p>This is the real article content, written as a full sentence
-            with enough length for the density scorer to recognize it as
-            genuine body text.</p>
-        </article></body></html>
+            <p>Some <strong>bold</strong> and <em>italic</em> text with a
+            <a href="/docs">relative link</a>.</p>
+        </body></html>
+        """
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/page")
+
+        assert "**bold**" in result["content_markdown"]
+        assert "*italic*" in result["content_markdown"]
+        # Relative -> absolute: a standalone Markdown file has no page
+        # context left to resolve "/docs" against once it's out of the DOM.
+        assert "[relative link](https://example.com/docs)" in result["content_markdown"]
+
+    def test_relative_image_src_is_resolved_to_an_absolute_url(self):
+        html = '<html><body><img src="/hero.jpg" alt="Hero"></body></html>'
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/page")
+
+        assert "![Hero](https://example.com/hero.jpg)" in result["content_markdown"]
+
+    def test_list_items_convert_to_markdown_bullets(self):
+        html = """
+        <html><body><ul>
+            <li>First item.</li>
+            <li>Second item.</li>
+        </ul></body></html>
         """
         with patch(PATCH_TARGET, return_value=make_response(html)):
             result = extract_content("https://example.com/")
 
-        assert paragraph_texts(result["blocks"]) == [
-            "This is the real article content, written as a full sentence "
-            "with enough length for the density scorer to recognize it as "
-            "genuine body text."
-        ]
+        assert result["content_markdown"] == "- First item.\n- Second item."
 
-    def test_boilerplate_disguised_as_a_real_tag_is_still_excluded(self):
-        # The actual bug that motivated switching to trafilatura: a real
-        # newsletter-signup CTA on Smashing Magazine survived the OLD
-        # tag-list stripper because it was a <div class="...aside...">,
-        # not an actual <aside> element -- a fixed tag list can never
-        # catch that; content-density scoring can. This recreates that
-        # exact shape (a CTA nested INSIDE the article via a CSS class
-        # that merely looks like an aside) alongside a real <aside> and
-        # normal nav/footer, with enough real paragraph text for
-        # trafilatura's density heuristics to actually have something to
-        # judge -- a one-line paragraph gives it no signal either way.
+    def test_adjacent_links_with_no_separating_whitespace_get_a_space(self):
+        # Real nav bars are commonly spaced only via CSS (flex gap), with
+        # no actual whitespace text node between the <a> tags in the DOM.
+        html = '<html><body><nav><a href="/a">A</a><a href="/b">B</a></nav></body></html>'
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/")
+
+        assert "[A](https://example.com/a) [B](https://example.com/b)" in result["content_markdown"]
+
+
+class TestFullPageNotJustMainContent:
+    """The extraction strategy is a direct HTML-to-Markdown conversion of
+    the whole <body> -- not density-scored "main content" picking. Nav,
+    footer, and aside content are real page content and must survive;
+    only <script>/<style> (not content at all) get excluded."""
+
+    def test_nav_footer_and_aside_content_all_survive(self):
         html = """
         <html><body>
-            <nav><a href="/">Home</a></nav>
-            <article>
-                <h1>How Core Web Vitals Work</h1>
-                <p>Core Web Vitals are a set of specific factors that Google
-                considers important in a webpage's overall user experience.
-                They measure dimensions of web usability such as load time,
-                interactivity, and the stability of content as it loads.</p>
-                <p>The three current Core Web Vitals metrics measure loading
-                performance, interactivity, and visual stability, and each
-                one maps to a concrete, measurable moment in a page's life
-                cycle rather than a vague notion of "feels fast."</p>
-                <div class="c-garfield-aside--meta">
-                    <h3>Get The Newsletter</h3>
-                    <p>Subscribe to our weekly newsletter for the latest
-                    articles on web performance delivered to your inbox.</p>
-                </div>
-            </article>
-            <aside>
-                <h3>Related Posts</h3>
-                <p>Check out our other articles on performance optimization.</p>
-            </aside>
+            <nav><a href="/">Home</a> <a href="/about">About</a></nav>
+            <article><p>Main article text.</p></article>
+            <aside><p>Related articles sidebar text.</p></aside>
             <footer><p>Copyright 2024 Example Site.</p></footer>
         </body></html>
         """
         with patch(PATCH_TARGET, return_value=make_response(html)):
-            result = extract_content("https://example.com/core-web-vitals")
+            result = extract_content("https://example.com/")
 
-        assert heading_texts(result["blocks"]) == ["How Core Web Vitals Work"]
-        paragraphs = paragraph_texts(result["blocks"])
-        assert len(paragraphs) == 2
-        combined = " ".join(paragraphs).lower()
-        assert "newsletter" not in combined
-        assert "related posts" not in combined
-        assert "copyright" not in combined
+        assert "[Home](https://example.com/)" in result["content_markdown"]
+        assert "Main article text." in result["content_markdown"]
+        assert "Related articles sidebar text." in result["content_markdown"]
+        assert "Copyright 2024 Example Site." in result["content_markdown"]
+
+    def test_script_and_style_text_never_appears(self):
+        html = """
+        <html><body>
+            <script>var x = "script text should not appear";</script>
+            <style>.p { color: red; }</style>
+            <p>Real content.</p>
+        </body></html>
+        """
+        with patch(PATCH_TARGET, return_value=make_response(html)):
+            result = extract_content("https://example.com/")
+
+        assert "script text should not appear" not in result["content_markdown"]
+        assert "color: red" not in result["content_markdown"]
+        assert result["content_markdown"] == "Real content."
 
 
 class TestFailureHandling:
@@ -319,7 +196,7 @@ class TestFailureHandling:
             "status": "failed",
             "url": "https://example.com/",
             "title": None,
-            "blocks": [],
+            "content_markdown": "",
             "error": "boom",
         }
 
@@ -343,7 +220,7 @@ class TestFailureHandling:
 
         assert result["status"] == "failed"
         assert "image/png" in result["error"]
-        assert result["blocks"] == []
+        assert result["content_markdown"] == ""
 
     def test_content_type_check_is_case_insensitive(self):
         html = "<html><body><article><p>Text.</p></article></body></html>"
@@ -381,7 +258,7 @@ class TestResponseSizeLimit:
 
         assert result["status"] == "failed"
         assert "exceed" in result["error"].lower()
-        assert result["blocks"] == []
+        assert result["content_markdown"] == ""
 
     def test_body_within_the_cap_is_parsed_normally(self):
         html = "<html><body><article><p>Small page.</p></article></body></html>"
@@ -389,7 +266,7 @@ class TestResponseSizeLimit:
             result = extract_content("https://example.com/")
 
         assert result["status"] == "success"
-        assert paragraph_texts(result["blocks"]) == ["Small page."]
+        assert result["content_markdown"] == "Small page."
 
     def test_malformed_content_length_header_is_ignored_not_fatal(self):
         response = make_response("<html><body><article><p>Fine.</p></article></body></html>")
@@ -398,7 +275,7 @@ class TestResponseSizeLimit:
             result = extract_content("https://example.com/")
 
         assert result["status"] == "success"
-        assert paragraph_texts(result["blocks"]) == ["Fine."]
+        assert result["content_markdown"] == "Fine."
 
 
 class TestRequestConfiguration:
@@ -443,7 +320,7 @@ class TestPacingAndRetry:
             result = extract_content("https://example.com/")
 
         assert result["status"] == "success"
-        assert paragraph_texts(result["blocks"]) == ["Recovered."]
+        assert result["content_markdown"] == "Recovered."
         assert mock_get.call_count == 2
         assert any(call.args and call.args[0] == 2.0 for call in mock_sleep.call_args_list)
 
@@ -489,12 +366,7 @@ class TestBrowserFallback:
         rendered_html = (
             "<html><head><title>Rendered Title</title></head>"
             "<body><article><h1>Real Heading</h1>"
-            "<p>Real paragraph that only exists after JS runs, written as a "
-            "full sentence so the density scorer has a genuine signal to "
-            "work with here.</p>"
-            "<p>A second real paragraph, also only present after the "
-            "client-side render completes, giving the extractor enough "
-            "total content to preserve structure.</p>"
+            "<p>Real paragraph that only exists after JS runs.</p>"
             "</article></body></html>"
         )
         with patch(PATCH_TARGET, return_value=make_response(shell_html)), \
@@ -505,15 +377,9 @@ class TestBrowserFallback:
         mock_render.assert_called_once_with("https://example.com/app")
         assert result["status"] == "success"
         assert result["title"] == "Rendered Title"
-        assert heading_texts(result["blocks"]) == ["Real Heading"]
-        assert paragraph_texts(result["blocks"]) == [
-            "Real paragraph that only exists after JS runs, written as a "
-            "full sentence so the density scorer has a genuine signal to "
-            "work with here.",
-            "A second real paragraph, also only present after the "
-            "client-side render completes, giving the extractor enough "
-            "total content to preserve structure.",
-        ]
+        assert result["content_markdown"] == (
+            "# Real Heading\n\nReal paragraph that only exists after JS runs."
+        )
 
     def test_render_failure_falls_back_to_the_raw_html_not_a_failed_result(self):
         shell_html = '<html><head><title>Shell Title</title></head><body><div id="root"></div></body></html>'
@@ -526,7 +392,7 @@ class TestBrowserFallback:
         # just proceeds on it instead of a rendered version.
         assert result["status"] == "success"
         assert result["title"] == "Shell Title"
-        assert result["blocks"] == []
+        assert result["content_markdown"] == ""
 
     def test_a_page_with_enough_visible_text_never_launches_a_browser(self):
         # Regression: this test does NOT override should_render_with_browser

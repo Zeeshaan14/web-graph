@@ -59,17 +59,13 @@ export interface DiscoverResponse {
 
 // ---- content_extraction ----------------------------------------------------
 
-export interface ContentBlock {
-  type: "heading" | "paragraph" | "list_item";
-  level: number | null;
-  text: string;
-}
-
 export interface ExtractResponse {
   status: "success" | "failed";
   url: string;
   title: string | null;
-  blocks: ContentBlock[];
+  // The page's full body converted to Markdown -- not a boilerplate-
+  // stripped "main content" pick. See backend/content_extraction.py.
+  content_markdown: string;
   error: string | null;
 }
 

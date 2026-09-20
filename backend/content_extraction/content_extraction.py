@@ -3,11 +3,11 @@ import re
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from xml.etree import ElementTree
+from urllib.parse import urljoin
 
 import requests
-import trafilatura
 from bs4 import BeautifulSoup
+from markdownify import markdownify
 
 from .browser import render_page_html, should_render_with_browser
 
@@ -99,7 +99,7 @@ def _failed(url: str, error: str) -> dict:
         "status": "failed",
         "url": url,
         "title": None,
-        "blocks": [],
+        "content_markdown": "",
         "error": error,
     }
 
@@ -130,19 +130,18 @@ def _decode_bounded(response: requests.Response, max_bytes: int) -> str | None:
         return bytes(body).decode("utf-8", errors="replace")
 
 
-# Heading levels we report -- matches what the old hand-rolled selector
-# collected (h1-h3, no h4-h6 subsection minutiae), even though
-# trafilatura's own output can include deeper levels.
-HEADING_LEVELS = {"h1", "h2", "h3"}
+def _resolve_relative_urls(soup: BeautifulSoup, base_url: str) -> None:
+    """Rewrites every <a href> and <img src> to an absolute URL, in place.
+    markdownify converts whatever's in the attribute verbatim -- a
+    relative "/docs" or "../privacy" would come through as a broken link
+    or image in the standalone Markdown output (there's no base URL to
+    resolve it against once it's out of the page's own DOM context,
+    unlike a link a browser resolves live)."""
+    for tag in soup.find_all("a", href=True):
+        tag["href"] = urljoin(base_url, tag["href"])
 
-
-def _element_text(element) -> str:
-    """Joins ALL of an element's text, including any nested inline
-    elements (links, bold, ...) -- trafilatura's XML output is normally
-    already flat plain text, but this is the same defensive join
-    BeautifulSoup's get_text() gave us before, so nothing regresses if
-    that's ever not true. Whitespace is collapsed the same way too."""
-    return " ".join("".join(element.itertext()).split())
+    for tag in soup.find_all("img", src=True):
+        tag["src"] = urljoin(base_url, tag["src"])
 
 
 def extract_content(url: str):
@@ -186,75 +185,52 @@ def extract_content(url: str):
             except Exception as exc:
                 logger.warning("Browser render failed for %s: %s", url, exc)
 
-        # Title comes straight from the HTML above -- this was never the
-        # problem the Smashing Magazine gap was about, and it's
-        # independent of whether trafilatura finds any body content.
+        # Title comes straight from the HTML above -- independent of
+        # whatever the body-to-Markdown conversion below finds or skips.
         soup = BeautifulSoup(html, "html.parser")
         title = soup.title.get_text(" ", strip=True) if soup.title else None
 
-        # trafilatura replaces the old hand-rolled article/main-picking +
-        # script/style/nav/footer/aside-stripping logic entirely -- real
-        # content-density scoring (link ratio, tag/class signals, DOM
-        # structure) instead of "strip this fixed list of tag names and
-        # hope." favor_recall=True over favor_precision=True: a real user
-        # report (lakshx.in/terms) showed favor_precision dropping an
-        # entire hero section -- eyebrow tag, h1 title, intro paragraph --
-        # as if it were boilerplate chrome, simply because of its position
-        # ahead of the "real" article body. favor_recall keeps that kind of
-        # borderline-but-real content without reopening the disguised-
-        # boilerplate case the newsletter-CTA test below guards against;
-        # that test passes either way, since it's the density scoring
-        # itself (not this flag) doing the real work there.
-        extracted_xml = trafilatura.extract(
-            html,
-            url=url,
-            output_format="xml",
-            with_metadata=False,
-            include_comments=False,
-            include_tables=False,
-            favor_recall=True,
-        )
+        # Full-page conversion, not density-scored "main content" picking:
+        # a real user comparison against another tool's output showed ours
+        # (previously trafilatura, boilerplate-stripped by design) silently
+        # dropping nav links, a hero image, and footer links that the user
+        # wanted kept. markdownify converts the whole body's HTML structure
+        # directly -- headings, bold/italic/links, lists, images -- with no
+        # judgment call about what counts as "real" content; <script> and
+        # <style> text is already excluded by markdownify itself, so
+        # nothing further needs stripping first.
+        #
+        # Scoped to <body> specifically, not the whole document: markdownify
+        # has no notion of <head> being non-content, so <title> text would
+        # otherwise leak into the output too, duplicating `title` above.
+        body = soup.body or soup
+        _resolve_relative_urls(body, url)
 
-        # A single ordered traversal -- not separate main.iter("head") and
-        # main.iter("p") passes -- because trafilatura's XML already gives
-        # us headings and paragraphs as ordered siblings under <main>, in
-        # the same order they appeared in the source document. Two separate
-        # passes would throw that order away and leave no way to tell which
-        # paragraph(s) actually followed which heading.
-        blocks = []
+        content_markdown = markdownify(
+            str(body),
+            heading_style="ATX",
+            bullets="-",
+        ).strip()
 
-        if extracted_xml:
-            main = ElementTree.fromstring(extracted_xml).find("main")
-            if main is not None:
-                for el in main.iter():
-                    if el.tag == "head" and el.get("rend") in HEADING_LEVELS:
-                        text = _element_text(el)
-                        if text:
-                            blocks.append({
-                                "type": "heading",
-                                "level": int(el.get("rend")[1]),
-                                "text": text,
-                            })
-                    elif el.tag == "p":
-                        text = _element_text(el)
-                        if text:
-                            blocks.append({"type": "paragraph", "text": text})
-                    elif el.tag == "item":
-                        # A bulleted/numbered list item -- trafilatura wraps
-                        # these as <list><item>...</item></list>, a shape
-                        # the old head/p-only pass silently dropped
-                        # entirely. The enclosing <list> element itself
-                        # isn't handled here (it has no tag match above),
-                        # only its <item> children, so nothing double-counts.
-                        text = _element_text(el)
-                        if text:
-                            blocks.append({"type": "list_item", "text": text})
+        # Collapse markdownify's occasional runs of 3+ blank lines (e.g.
+        # around stripped script/style tags) down to one, same as a
+        # Markdown renderer would treat them anyway -- purely cosmetic,
+        # doesn't change what content survived.
+        content_markdown = re.sub(r"\n{3,}", "\n\n", content_markdown)
+
+        # Adjacent nav/footer links are commonly spaced only via CSS (a
+        # flexbox gap), with no actual whitespace text node between the
+        # <a> tags in the DOM -- faithfully converted, that leaves
+        # "[Docs](...)[Changelog](...)" with no separator at all. A single
+        # space between two back-to-back links reads correctly without
+        # having to guess at the source page's visual layout.
+        content_markdown = re.sub(r"\)\[", ") [", content_markdown)
 
         return {
             "status": "success",
             "url": url,
             "title": title,
-            "blocks": blocks,
+            "content_markdown": content_markdown,
             "error": None,
         }
 
@@ -274,9 +250,5 @@ if __name__ == "__main__":
         key: (value.encode("ascii", "replace").decode() if isinstance(value, str) else value)
         for key, value in result.items()
     }
-    safe["blocks"] = [
-        {**block, "text": block["text"].encode("ascii", "replace").decode()}
-        for block in result["blocks"]
-    ]
 
     print(safe)

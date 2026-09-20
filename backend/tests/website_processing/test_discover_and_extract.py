@@ -29,7 +29,7 @@ def page(status, url="https://example.com/p", error=None):
         "status": status,
         "url": url,
         "title": "Title" if status == "success" else None,
-        "blocks": [{"type": "paragraph", "text": "P"}] if status == "success" else [],
+        "content_markdown": "P" if status == "success" else "",
         "error": error,
     }
 

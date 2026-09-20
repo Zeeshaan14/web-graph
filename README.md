@@ -226,27 +226,29 @@ of this feature:
 ## Feature 2B: Content extraction (V1)
 
 `content_extraction.content_extraction.extract_content(url)` fetches one URL
-and pulls out its title, headings (`h1`–`h3`), and paragraph text. Unlike the
-other two features, this is a single-resource result, not a batch — so its
-contract is a plain `{status: "success" | "failed", url, title, headings,
-paragraphs, error}` with no `"partial"` state and a single nullable `error`
-field rather than a list.
+and converts its whole `<body>` to Markdown. Unlike the other two features,
+this is a single-resource result, not a batch — so its contract is a plain
+`{status: "success" | "failed", url, title, content_markdown, error}` with no
+`"partial"` state and a single nullable `error` field rather than a list.
 
 ### What V1 actually supports
 
-- Main-content extraction via [`trafilatura`](https://github.com/adbar/trafilatura)
-  instead of a hand-rolled `article`/`main` tag search — real content-density
-  scoring (link ratio, tag/class signals, DOM structure) rather than "strip
-  this fixed list of tag names and hope." `favor_precision=True` biases it
-  toward excluding borderline content over maximizing how much text comes
-  back, matching what this feature is actually for. Confirmed directly: a
-  realistic recreation of the exact bug below (a CTA in a `<div
-  class="...aside...">`, not a real `<aside>`) is now correctly excluded
-  alongside a real `<aside>`, nav, and footer, leaving only the genuine
-  article paragraphs and headings
+- Full-page HTML-to-Markdown conversion via
+  [`markdownify`](https://github.com/matthewwithanm/python-markdownify) —
+  not density-scored "main content" picking. Nav links, footer links,
+  images, and real inline formatting (bold/italic/links) all come through,
+  in document order; only `<script>`/`<style>` text is excluded, since
+  that's code, not content. This replaced an earlier `trafilatura`-based
+  "article extractor" that deliberately stripped boilerplate — a direct
+  comparison against another extraction tool showed that approach silently
+  dropping a page's own nav, hero image, and footer links, which is real
+  content a caller who asked to extract a page would reasonably expect back
+- Relative `<a href>`/`<img src>` are resolved to absolute URLs before
+  conversion — a downloaded/standalone `.md` file has no page context left
+  to resolve `/docs` against once it's out of the DOM
 - Title still comes straight from the raw HTML `<title>` tag, independent of
-  whether trafilatura finds any body content at all
-- Boilerplate stripping — now trafilatura's own scoring, not a fixed tag list
+  the body conversion, and scoped out of `content_markdown` itself (which is
+  built from `<body>` only) so it isn't duplicated
 - A browser-shaped request (headers alone got us past a real `403` on
   `realpython.com` during development) — kept as its own local copy rather
   than importing `url_discovery/fetcher.py`, so the two features stay
@@ -281,17 +283,13 @@ field rather than a list.
 
 ### What V1 does *not* promise yet
 
-- **Tuned for articles/prose, not link-grid index pages** — confirmed
-  directly during development: a documentation *landing* page that's mostly
-  short link+blurb cards (not prose) under-extracted badly (1 heading, 2
-  paragraphs, vs. the old hand-rolled extractor's ~14/~19 on the same page)
-  once trafilatura correctly recognized the link-heavy layout as
-  navigation-like rather than article content. Genuine prose pages on the
-  same site (a privacy policy, a terms page, a single docs article)
-  extracted comparably to or better than before. This is an honest trade-off
-  of adopting a real content-density scorer, not something worked around
-  here — a docs *index* page and a blog *listing* page are structurally
-  navigation, and a general-purpose article extractor isn't built for them.
+- **No boilerplate filtering at all, by design** — a link-grid index page,
+  a docs landing page, a listing page: all convert in full now, nav and
+  footer included, which is the whole point of this approach. The
+  trade-off runs the other way from before: a caller who specifically
+  wants just an article's prose, with chrome stripped out, doesn't get
+  that here — they get the whole page, same as viewing "page source" but
+  as Markdown instead of raw HTML.
 - **The browser fallback only catches a fully unrendered shell, not a
   hybrid page** — same inherited heuristic limitation as `url_discovery`'s
   version: real chrome (nav/header/footer) with JS-rendered *main* content
@@ -377,7 +375,7 @@ web-graph/
 │   │   └── browser.py               #   Playwright fallback -- render + should-render heuristic;
 │   │                                 #   crawler.py owns the browser's LIFECYCLE across the crawl
 │   │
-│   ├── content_extraction/         # feature 2B: pulls title/headings/paragraphs from one URL
+│   ├── content_extraction/         # feature 2B: converts one URL's title + full body to Markdown
 │   │   ├── content_extraction.py    #   extract_content() -- single file, single-resource contract
 │   │   └── browser.py               #   Playwright fallback -- single-shot (one URL per call,
 │   │                                 #   unlike url_discovery, so no lifecycle to manage)

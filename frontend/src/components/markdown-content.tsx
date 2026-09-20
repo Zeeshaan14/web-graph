@@ -5,21 +5,29 @@ import remarkGfm from "remark-gfm";
 // rehype-raw plugin here) -- important since this renders arbitrary
 // third-party page content, not text we authored ourselves.
 
-// Markdown "##"/"###"/"####" map to a page's own h1/h2/h3 (see
-// lib/markdown.ts's HEADING_PREFIXES) -- the semantic tag and size each
-// gets here just nests one level below whatever wraps this component:
-// a card with its own title above (content-extraction), or an accordion
-// item whose own trigger already shows the page title (discover-and-extract).
+// content_markdown is a direct conversion of a page's whole <body>, so its
+// heading levels are the source page's own h1-h6, unshifted. The semantic
+// tag and size each maps to here just nests one level below whatever wraps
+// this component: a card with its own title above (content-extraction), or
+// an accordion item whose own trigger already shows the page title
+// (discover-and-extract). Capped at h6 (HTML's own max) for anything at
+// or past that nesting depth -- reusing h6's own (smallest) size class.
 const VARIANT_HEADINGS = {
   card: {
-    h2: "h3" as const,
-    h3: "h4" as const,
-    h4: "h5" as const,
-  },
-  accordion: {
+    h1: "h3" as const,
     h2: "h4" as const,
     h3: "h5" as const,
     h4: "h6" as const,
+    h5: "h6" as const,
+    h6: "h6" as const,
+  },
+  accordion: {
+    h1: "h4" as const,
+    h2: "h5" as const,
+    h3: "h6" as const,
+    h4: "h6" as const,
+    h5: "h6" as const,
+    h6: "h6" as const,
   },
 };
 
@@ -45,7 +53,7 @@ export function MarkdownContent({
         remarkPlugins={[remarkGfm]}
         components={{
           h1: (props) => {
-            const Tag = headingTags.h2;
+            const Tag = headingTags.h1;
             return <Tag className={HEADING_SIZE_CLASSES[Tag]}>{props.children}</Tag>;
           },
           h2: (props) => {
@@ -60,14 +68,21 @@ export function MarkdownContent({
             const Tag = headingTags.h4;
             return <Tag className={HEADING_SIZE_CLASSES[Tag]}>{props.children}</Tag>;
           },
+          h5: (props) => {
+            const Tag = headingTags.h5;
+            return <Tag className={HEADING_SIZE_CLASSES[Tag]}>{props.children}</Tag>;
+          },
+          h6: (props) => {
+            const Tag = headingTags.h6;
+            return <Tag className={HEADING_SIZE_CLASSES[Tag]}>{props.children}</Tag>;
+          },
           p: (props) => <p className="mt-2 first:mt-0">{props.children}</p>,
           ul: (props) => (
             <ul className="mt-2 flex flex-col gap-1.5 first:mt-0">{props.children}</ul>
           ),
-          // Our own content never produces ordered lists (list_item blocks
-          // always come from trafilatura's <item>, ul or ol alike, and
-          // blocksToMarkdown always emits "-" bullets) -- native numbering
-          // here is just a reasonable default if that ever changes.
+          // A real <ol> in the source page converts to a genuinely
+          // numbered Markdown list (unlike <ul>, which always renders as
+          // our own dot-bullet style below) -- native numbering here.
           ol: (props) => (
             <ol className="mt-2 flex list-decimal flex-col gap-1.5 pl-5 first:mt-0">
               {props.children}
@@ -81,6 +96,16 @@ export function MarkdownContent({
               />
               <span>{props.children}</span>
             </li>
+          ),
+          img: (props) => (
+            // Arbitrary third-party image URLs, not a local/optimizable asset.
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={props.src}
+              alt={props.alt ?? ""}
+              loading="lazy"
+              className="mt-2 max-w-full rounded-md border first:mt-0"
+            />
           ),
           a: (props) => (
             <a
@@ -101,6 +126,16 @@ export function MarkdownContent({
               {props.children}
             </blockquote>
           ),
+          table: (props) => (
+            <div className="mt-2 overflow-x-auto first:mt-0">
+              <table className="w-full border-collapse text-sm">{props.children}</table>
+            </div>
+          ),
+          thead: (props) => <thead className="border-b">{props.children}</thead>,
+          th: (props) => (
+            <th className="px-2 py-1.5 text-left font-semibold text-foreground">{props.children}</th>
+          ),
+          td: (props) => <td className="border-t px-2 py-1.5 align-top">{props.children}</td>,
         }}
       >
         {markdown}

@@ -67,27 +67,21 @@ def test_bare_spa_shell_content_is_only_found_via_a_real_browser_render(spa_shel
 
     assert result["status"] == "success"
     assert result["title"] == "Real Rendered Title"
-    assert result["blocks"] == [
-        {"type": "heading", "level": 1, "text": "Real Heading From JS"},
-        {
-            "type": "paragraph",
-            "text": "This paragraph only exists after JavaScript runs and populates the DOM, "
-            "written as a full sentence so the density scorer has a genuine signal.",
-        },
-        {
-            "type": "paragraph",
-            "text": "A second real paragraph, also only present once the client-side render "
-            "completes, giving the extractor enough total content to preserve structure.",
-        },
-    ]
+    assert result["content_markdown"] == (
+        "# Real Heading From JS\n\n"
+        "This paragraph only exists after JavaScript runs and populates the DOM, "
+        "written as a full sentence so the density scorer has a genuine signal.\n\n"
+        "A second real paragraph, also only present once the client-side render "
+        "completes, giving the extractor enough total content to preserve structure."
+    )
 
 
 def test_lakshx_in_extracts_successfully_with_browser_fallback_wired_in():
-    # Confirms the new browser-fallback code path doesn't break a normal,
+    # Confirms the browser-fallback code path doesn't break a normal,
     # fully server-rendered page -- lakshx.in/docs has real visible
     # content, so this should never trigger a browser render at all.
     result = extract_content("https://lakshx.in/docs")
 
     assert result["status"] == "success"
     assert result["title"]
-    assert any(b["type"] == "paragraph" for b in result["blocks"])
+    assert len(result["content_markdown"]) > 0
