@@ -41,6 +41,36 @@ ROBOTS_USER_AGENT = "*"
 # fixed safety valve, not a knob.
 MAX_BROWSER_RENDERS_PER_CRAWL = 10
 
+# Substring markers for a DNS resolution failure, checked against a
+# ConnectionError's own str() -- the real underlying exception (urllib3's
+# NameResolutionError, wrapping a socket.gaierror) is buried inside
+# ConnectionError.args, not exposed as its own catchable type, so this is
+# the standard way to detect it. Covers the OS-specific errno wording:
+# Windows' "getaddrinfo failed", Linux's "Name or service not known",
+# macOS's "nodename nor servname".
+_DNS_FAILURE_MARKERS = (
+    "NameResolutionError",
+    "getaddrinfo failed",
+    "Name or service not known",
+    "nodename nor servname",
+)
+
+
+def _friendly_fetch_error(url: str, exc: requests.RequestException) -> str:
+    """requests' own str(exc) for a ConnectionError is an internal repr --
+    "HTTPSConnectionPool(host=..., port=443): Max retries exceeded with
+    url: / (Caused by NameResolutionError(...))" -- technically accurate,
+    not something worth showing someone who just typed a URL into a form.
+    Anything else (HTTPError, Timeout, ...) already has a reasonably clean
+    str() of its own, left as-is."""
+    if isinstance(exc, requests.exceptions.ConnectionError) and any(
+        marker in str(exc) for marker in _DNS_FAILURE_MARKERS
+    ):
+        return f"Could not resolve '{url}' -- check the domain and try again."
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return f"Could not connect to '{url}'."
+    return str(exc)
+
 
 def _load_robots_policy(session, scheme: str, domain: str) -> RobotFileParser:
     """Fetches and parses robots.txt for the site being crawled -- always
@@ -240,7 +270,7 @@ def crawl_stream(
                 response = fetch(session, current_url)
             except requests.RequestException as exc:
                 logger.warning("Failed to fetch %s: %s", current_url, exc)
-                errors.append({"url": current_url, "error": str(exc)})
+                errors.append({"url": current_url, "error": _friendly_fetch_error(current_url, exc)})
                 continue
 
             # The server may have redirected us -- the final destination,

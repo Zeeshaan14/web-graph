@@ -447,9 +447,45 @@ class TestFailedRequestIsRecordedNotFatal:
 
         assert "https://example.com/broken/" not in result["urls"]
         assert "https://example.com/ok/" in result["urls"]
-        assert result["errors"] == [{"url": "https://example.com/broken/", "error": "boom"}]
+        assert result["errors"] == [
+            {"url": "https://example.com/broken/", "error": "Could not connect to 'https://example.com/broken/'."}
+        ]
         # The start page and /ok/ both succeeded -- 2 traversed, 1 recorded failure.
         assert result["pages_traversed"] == 2
+
+    def test_dns_failure_is_recorded_with_a_friendly_message(self):
+        def fake_get(url, timeout=10):
+            if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
+                return make_not_found_response(url)
+
+            if url == "https://example.com/broken/":
+                raise requests.ConnectionError(
+                    "HTTPSConnectionPool(host='broken', port=443): Max retries exceeded "
+                    "with url: / (Caused by NameResolutionError(\"Failed to resolve 'broken' "
+                    "([Errno 11001] getaddrinfo failed)\"))"
+                )
+
+            pages = {
+                "https://example.com/": (
+                    "https://example.com/",
+                    '<a href="/broken/">Broken</a>',
+                ),
+            }
+            final_url, html = pages[url]
+            resp = MagicMock(status_code=200, url=final_url, text=html, headers={})
+            resp.raise_for_status.side_effect = None
+            return resp
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        assert result["errors"] == [
+            {
+                "url": "https://example.com/broken/",
+                "error": "Could not resolve 'https://example.com/broken/' -- check the domain and try again.",
+            }
+        ]
 
     def test_external_redirects_and_already_traversed_skips_are_never_recorded_as_errors(self):
         # Regression: only a genuine RequestException is an "error" --
@@ -513,7 +549,9 @@ class TestDiscoverUrls:
 
         assert result["status"] == "partial"
         assert result["pages_traversed"] == 2
-        assert result["errors"] == [{"url": "https://example.com/broken/", "error": "boom"}]
+        assert result["errors"] == [
+            {"url": "https://example.com/broken/", "error": "Could not connect to 'https://example.com/broken/'."}
+        ]
         assert "https://example.com/ok/" in result["discovered_urls"]
 
     def test_failed_when_start_url_itself_fails(self):
@@ -529,7 +567,7 @@ class TestDiscoverUrls:
             "start_url": "https://example.com/",
             "discovered_urls": [],
             "pages_traversed": 0,
-            "errors": [{"url": "https://example.com/", "error": "Connection timed out"}],
+            "errors": [{"url": "https://example.com/", "error": "Could not connect to 'https://example.com/'."}],
         }
 
     def test_one_stale_link_among_many_good_pages_is_partial_not_failed(self):

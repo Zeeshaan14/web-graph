@@ -34,6 +34,22 @@ class TestFetchFailuresNeverRaise:
 
         assert result["status"] == "failed"
         assert result["errors"][0]["type"] == "connection_error"
+        assert result["errors"][0]["message"] == "Could not connect to 'https://nope.invalid'."
+
+    def test_dns_failure_returns_friendly_message(self):
+        exc = requests.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='nope.invalid', port=443): Max retries exceeded "
+            "with url: / (Caused by NameResolutionError(\"Failed to resolve 'nope.invalid' "
+            "([Errno 11001] getaddrinfo failed)\"))"
+        )
+        with patch("tech_detection.pipeline.fetch_url", side_effect=exc):
+            result = pipeline.detect_website_technologies("https://nope.invalid")
+
+        assert result["status"] == "failed"
+        assert (
+            result["errors"][0]["message"]
+            == "Could not resolve 'https://nope.invalid' -- check the domain and try again."
+        )
 
     def test_timeout(self):
         with patch("tech_detection.pipeline.fetch_url", side_effect=requests.exceptions.Timeout("slow")):

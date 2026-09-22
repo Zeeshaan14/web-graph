@@ -197,8 +197,19 @@ class TestFailureHandling:
             "url": "https://example.com/",
             "title": None,
             "content_markdown": "",
-            "error": "boom",
+            "error": "Could not connect to 'https://example.com/'.",
         }
+
+    def test_dns_failure_returns_friendly_message(self):
+        exc = requests.ConnectionError(
+            "HTTPSConnectionPool(host='nope.invalid', port=443): Max retries exceeded "
+            "with url: / (Caused by NameResolutionError(\"Failed to resolve 'nope.invalid' "
+            "([Errno 11001] getaddrinfo failed)\"))"
+        )
+        with patch(PATCH_TARGET, side_effect=exc):
+            result = extract_content("https://nope.invalid/")
+
+        assert result["error"] == "Could not resolve 'https://nope.invalid/' -- check the domain and try again."
 
     def test_timeout_returns_failed(self):
         with patch(PATCH_TARGET, side_effect=requests.Timeout("timed out")):

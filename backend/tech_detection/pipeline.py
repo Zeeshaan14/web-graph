@@ -52,6 +52,31 @@ from .browser import collect_browser_evidence
 from .inference import add_inferred_technologies
 
 
+# Substring markers for a DNS resolution failure, checked against a
+# ConnectionError's own str() -- the real underlying exception (urllib3's
+# NameResolutionError, wrapping a socket.gaierror) is buried inside
+# ConnectionError.args, not exposed as its own catchable type, so this is
+# the standard way to detect it. Covers the OS-specific errno wording:
+# Windows' "getaddrinfo failed", Linux's "Name or service not known",
+# macOS's "nodename nor servname".
+_DNS_FAILURE_MARKERS = (
+    "NameResolutionError",
+    "getaddrinfo failed",
+    "Name or service not known",
+    "nodename nor servname",
+)
+
+
+def _friendly_connection_error(url: str, exc: requests.exceptions.ConnectionError) -> str:
+    """requests' own str(exc) for a ConnectionError is an internal repr --
+    "HTTPSConnectionPool(host=..., port=443): Max retries exceeded with
+    url: / (Caused by NameResolutionError(...))" -- technically accurate,
+    not something worth showing someone who just typed a URL into a form."""
+    if any(marker in str(exc) for marker in _DNS_FAILURE_MARKERS):
+        return f"Could not resolve '{url}' -- check the domain and try again."
+    return f"Could not connect to '{url}'."
+
+
 def _failed_result(url, error_type, message, http_status=None):
     return {
         "url": url,
@@ -72,7 +97,7 @@ def detect_website_technologies(url: str):
     except requests.exceptions.MissingSchema:
         return _failed_result(url, "invalid_url", f"'{url}' is not a valid URL (missing scheme, e.g. https://)")
     except requests.exceptions.ConnectionError as exc:
-        return _failed_result(url, "connection_error", f"Could not connect to '{url}': {exc}")
+        return _failed_result(url, "connection_error", _friendly_connection_error(url, exc))
     except requests.exceptions.Timeout:
         return _failed_result(url, "timeout", f"Request to '{url}' timed out")
     except requests.exceptions.RequestException as exc:
