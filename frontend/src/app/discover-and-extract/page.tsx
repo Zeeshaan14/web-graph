@@ -26,7 +26,6 @@ import { Label } from "@/components/ui/label";
 import { EmptyState } from "@/components/empty-state";
 import { MarkdownContent, RawMarkdown } from "@/components/markdown-content";
 import { PageHero } from "@/components/page-hero";
-import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -270,7 +269,29 @@ function DiscoverAndExtractPageInner() {
       </PageHero>
 
       <div className="flex flex-col gap-6 py-8">
-        {loading && !discovery && <ResultSkeleton />}
+        {loading && !discovery && (
+          // A live status card, not a generic skeleton -- discovery (the
+          // crawl itself) commonly takes several seconds with no
+          // sub-progress of its own to report, and a static skeleton gives
+          // no sign the stream connection is even open during that whole
+          // window. This shows the real phase text from the moment the
+          // request starts, so the wait reads as "in progress," not frozen.
+          <Card className="animate-in fade-in duration-300">
+            <CardHeader>
+              <CardTitle className="flex flex-wrap items-center gap-2">
+                Result for <span className="font-mono text-sm font-normal">{url}</span>
+              </CardTitle>
+              <CardDescription>
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  <Badge variant="outline" className="gap-1.5">
+                    <Loader2 className="size-3 animate-spin" />
+                    {phaseLabel}
+                  </Badge>
+                </div>
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        )}
 
         {!loading && !discovery && !finalResult && (
           <EmptyState
