@@ -85,7 +85,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center justify-center gap-1.5 sm:justify-end">
-                  {["FastAPI", "Next.js", "Playwright", "trafilatura"].map((tech) => (
+                  {["FastAPI", "Next.js", "Playwright", "markdownify"].map((tech) => (
                     <span
                       key={tech}
                       className="rounded-sm border bg-muted/50 px-2 py-0.5 font-mono text-[11px] text-muted-foreground"
