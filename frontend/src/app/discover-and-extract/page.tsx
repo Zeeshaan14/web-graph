@@ -29,8 +29,20 @@ import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ApiError, discoverAndExtract, type DiscoverAndExtractResponse } from "@/lib/api";
+import {
+  ApiError,
+  discoverAndExtractStream,
+  type DiscoverAndExtractResponse,
+  type DiscoverResponse,
+  type ExtractResponse,
+} from "@/lib/api";
 import { downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
+
+// A page starts as a bare placeholder (we only know its URL, from the
+// discovery_done event) and "graduates" into the full ExtractResponse
+// shape once its own page_rendered event arrives -- the same row stays
+// mounted throughout (keyed by url), just filling in.
+type PageStreamState = { url: string; phase: "pending" } | ({ phase: "done" } & ExtractResponse);
 
 function DiscoverAndExtractForm({
   url,
@@ -117,21 +129,66 @@ function DiscoverAndExtractPageInner() {
   const [maxPages, setMaxPages] = useState("5");
   const [maxDepth, setMaxDepth] = useState("");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<DiscoverAndExtractResponse | null>(null);
   const [zipping, setZipping] = useState(false);
   const autoRan = useRef(false);
+
+  // Streaming state -- fills in progressively as events arrive, instead of
+  // one result object appearing all at once at the end.
+  const [phaseLabel, setPhaseLabel] = useState("");
+  const [discovery, setDiscovery] = useState<DiscoverResponse | null>(null);
+  const [pages, setPages] = useState<PageStreamState[]>([]);
+  const [sharedContentMarkdown, setSharedContentMarkdown] = useState("");
+  const [finalResult, setFinalResult] = useState<DiscoverAndExtractResponse | null>(null);
 
   async function runWorkflow(targetUrl: string) {
     if (!targetUrl.trim()) return;
     setLoading(true);
-    setResult(null);
+    setPhaseLabel("Starting...");
+    setDiscovery(null);
+    setPages([]);
+    setSharedContentMarkdown("");
+    setFinalResult(null);
+
+    // Plain closures, not state -- these only ever drive the human-readable
+    // phaseLabel text, so there's no reason to round-trip them through React.
+    let total = 0;
+    let fetched = 0;
+
     try {
-      const response = await discoverAndExtract(
+      await discoverAndExtractStream(
         targetUrl.trim(),
         Number(maxPages) || 10,
-        maxDepth.trim() === "" ? null : Number(maxDepth)
+        maxDepth.trim() === "" ? null : Number(maxDepth),
+        (event) => {
+          switch (event.event) {
+            case "discovery_started":
+              setPhaseLabel("Discovering pages...");
+              break;
+            case "discovery_done":
+              setDiscovery(event.discovery);
+              total = event.discovery.discovered_urls.length;
+              setPages(event.discovery.discovered_urls.map((pageUrl) => ({ url: pageUrl, phase: "pending" })));
+              setPhaseLabel(total > 0 ? `Fetching 0/${total} pages...` : "No pages to extract.");
+              break;
+            case "page_fetched":
+              fetched += 1;
+              setPhaseLabel(`Fetching ${fetched}/${total} pages...`);
+              break;
+            case "dedup_done":
+              setSharedContentMarkdown(event.shared_content_markdown);
+              setPhaseLabel("Rendering pages...");
+              break;
+            case "page_rendered":
+              setPages((prev) =>
+                prev.map((p) => (p.url === event.page.url ? { phase: "done", ...event.page } : p))
+              );
+              break;
+            case "complete":
+              setFinalResult(event.result);
+              break;
+          }
+        }
       );
-      setResult(response);
     } catch (error) {
       toast.error(error instanceof ApiError ? error.message : "Something went wrong.");
     } finally {
@@ -140,14 +197,14 @@ function DiscoverAndExtractPageInner() {
   }
 
   async function downloadZip() {
-    if (!result || result.pages.length === 0) return;
+    if (!finalResult || finalResult.pages.length === 0) return;
     setZipping(true);
     try {
       const { default: JSZip } = await import("jszip");
       const zip = new JSZip();
       const usedNames = new Set<string>();
 
-      for (const page of result.pages) {
+      for (const page of finalResult.pages) {
         const baseName = slugifyUrl(page.url);
         let filename = `${baseName}.md`;
         let suffix = 2;
@@ -159,12 +216,12 @@ function DiscoverAndExtractPageInner() {
         zip.file(filename, extractResponseToMarkdown(page));
       }
 
-      if (result.shared_content_markdown.trim()) {
-        zip.file("_shared.md", result.shared_content_markdown);
+      if (finalResult.shared_content_markdown.trim()) {
+        zip.file("_shared.md", finalResult.shared_content_markdown);
       }
 
       const blob = await zip.generateAsync({ type: "blob" });
-      downloadBlob(blob, `${slugifyUrl(result.start_url) || "site"}-extract.zip`);
+      downloadBlob(blob, `${slugifyUrl(finalResult.start_url) || "site"}-extract.zip`);
     } catch {
       toast.error("Could not build the .zip file.");
     } finally {
@@ -190,7 +247,7 @@ function DiscoverAndExtractPageInner() {
     runWorkflow(url);
   }
 
-  const succeeded = result?.pages.filter((p) => p.status === "success").length ?? 0;
+  const succeeded = pages.filter((p) => p.phase === "done" && p.status === "success").length;
 
   return (
     <div className="flex flex-col">
@@ -198,7 +255,7 @@ function DiscoverAndExtractPageInner() {
         icon={Workflow}
         eyebrow="Feature 2C"
         title="Discover + Extract"
-        description="Runs URL discovery, then extracts content from every discovered page -- up to 5 pages at once, with its own pacing and retry, folded into one combined result. Nav/sidebar/footer content repeated across pages is deduplicated and reported once."
+        description="Runs URL discovery, then extracts content from every discovered page -- up to 5 pages at once, with its own pacing and retry, folded into one combined result. Nav/sidebar/footer content repeated across pages is deduplicated and reported once. Results stream in live as each stage finishes, not all at once at the end."
       >
         <DiscoverAndExtractForm
           url={url}
@@ -213,9 +270,9 @@ function DiscoverAndExtractPageInner() {
       </PageHero>
 
       <div className="flex flex-col gap-6 py-8">
-        {loading && <ResultSkeleton />}
+        {loading && !discovery && <ResultSkeleton />}
 
-        {!loading && !result && (
+        {!loading && !discovery && !finalResult && (
           <EmptyState
             icon={Workflow}
             title="No run yet"
@@ -223,37 +280,46 @@ function DiscoverAndExtractPageInner() {
           />
         )}
 
-        {!loading && result && (
+        {discovery && (
           <div className="flex animate-in fade-in flex-col gap-6 duration-300">
             <Card>
               <CardHeader>
                 <CardTitle className="flex flex-wrap items-center gap-2">
-                  Result for <span className="font-mono text-sm font-normal">{result.start_url}</span>
+                  Result for <span className="font-mono text-sm font-normal">{discovery.start_url}</span>
                 </CardTitle>
                 <CardDescription>
                   <div className="flex flex-wrap items-center gap-2 pt-2">
-                    <StatusBadge status={result.status} />
-                    <Badge variant="outline">discovery: {result.discovery.status}</Badge>
-                    <Badge variant="outline">{result.discovery.pages_traversed} pages traversed</Badge>
-                    <Badge variant="outline">
-                      {succeeded}/{result.pages.length} extracted successfully
-                    </Badge>
+                    {finalResult ? (
+                      <StatusBadge status={finalResult.status} />
+                    ) : (
+                      <Badge variant="outline" className="gap-1.5">
+                        <Loader2 className="size-3 animate-spin" />
+                        {phaseLabel}
+                      </Badge>
+                    )}
+                    <Badge variant="outline">discovery: {discovery.status}</Badge>
+                    <Badge variant="outline">{discovery.pages_traversed} pages traversed</Badge>
+                    {pages.length > 0 && (
+                      <Badge variant="outline">
+                        {succeeded}/{pages.length} extracted successfully
+                      </Badge>
+                    )}
                   </div>
                 </CardDescription>
               </CardHeader>
-              {result.pages.length > 0 && (
+              {pages.length > 0 && (
                 <CardContent>
                   <div className="h-1.5 overflow-hidden rounded-full bg-muted">
                     <div
                       className="h-full rounded-full bg-primary transition-all"
-                      style={{ width: `${(succeeded / result.pages.length) * 100}%` }}
+                      style={{ width: `${(succeeded / pages.length) * 100}%` }}
                     />
                   </div>
                 </CardContent>
               )}
-              {result.discovery.errors.length > 0 && (
+              {discovery.errors.length > 0 && (
                 <CardContent className="flex flex-col gap-2">
-                  {result.discovery.errors.map((err, i) => (
+                  {discovery.errors.map((err, i) => (
                     <Alert variant="destructive" key={i}>
                       <AlertCircle className="size-4" />
                       <AlertTitle className="font-mono text-xs">{err.url}</AlertTitle>
@@ -264,7 +330,7 @@ function DiscoverAndExtractPageInner() {
               )}
             </Card>
 
-            {result.shared_content_markdown.trim() && (
+            {sharedContentMarkdown.trim() && (
               <Card className="overflow-hidden">
                 <div className="h-1.5 bg-muted-foreground/40" />
                 <CardHeader>
@@ -283,19 +349,19 @@ function DiscoverAndExtractPageInner() {
                   </div>
                   <TabsContent value="preview" className="m-0">
                     <CardContent className="max-h-96 overflow-y-auto pt-4 pr-1">
-                      <MarkdownContent markdown={result.shared_content_markdown} variant="card" />
+                      <MarkdownContent markdown={sharedContentMarkdown} variant="card" />
                     </CardContent>
                   </TabsContent>
                   <TabsContent value="markdown" className="m-0">
                     <CardContent className="max-h-96 overflow-y-auto pt-4 pr-1">
-                      <RawMarkdown markdown={result.shared_content_markdown} />
+                      <RawMarkdown markdown={sharedContentMarkdown} />
                     </CardContent>
                   </TabsContent>
                 </Tabs>
               </Card>
             )}
 
-            {result.pages.length > 0 ? (
+            {pages.length > 0 ? (
               <Card>
                 <CardHeader className="flex-row items-center justify-between">
                   <CardTitle className="text-base">Pages</CardTitle>
@@ -303,7 +369,7 @@ function DiscoverAndExtractPageInner() {
                     variant="ghost"
                     size="sm"
                     className="gap-1.5 text-xs"
-                    disabled={zipping}
+                    disabled={zipping || !finalResult}
                     onClick={downloadZip}
                   >
                     {zipping ? (
@@ -316,10 +382,12 @@ function DiscoverAndExtractPageInner() {
                 </CardHeader>
                 <CardContent>
                   <Accordion type="single" collapsible className="w-full">
-                    {result.pages.map((page, i) => (
-                      <AccordionItem key={i} value={`page-${i}`}>
+                    {pages.map((page, i) => (
+                      <AccordionItem key={page.url} value={`page-${i}`}>
                         <div className="flex flex-wrap items-center gap-2">
-                          {page.status === "success" ? (
+                          {page.phase === "pending" ? (
+                            <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+                          ) : page.status === "success" ? (
                             <CheckCircle2 className="size-4 shrink-0 text-emerald-500" />
                           ) : (
                             <XCircle className="size-4 shrink-0 text-red-500" />
@@ -338,44 +406,53 @@ function DiscoverAndExtractPageInner() {
                             {page.url}
                           </a>
                           <AccordionTrigger className="gap-3 text-sm">
-                            {page.status === "success" && page.title && (
-                              <span className="truncate text-left font-medium">{page.title}</span>
+                            {page.phase === "pending" ? (
+                              <span className="text-left text-muted-foreground">Extracting...</span>
+                            ) : (
+                              page.status === "success" &&
+                              page.title && <span className="truncate text-left font-medium">{page.title}</span>
                             )}
                           </AccordionTrigger>
                         </div>
                         <AccordionContent className="flex flex-col gap-3">
-                          {page.error && (
-                            <Alert variant="destructive">
-                              <AlertCircle className="size-4" />
-                              <AlertDescription>{page.error}</AlertDescription>
-                            </Alert>
-                          )}
-                          {!page.content_markdown.trim() && !page.error && (
-                            <p className="text-sm text-muted-foreground">
-                              No extractable content was found on this page.
-                            </p>
-                          )}
-                          {page.content_markdown.trim() && (
-                            <Tabs defaultValue="preview" className="gap-2">
-                              <TabsList variant="line" className="h-7">
-                                <TabsTrigger value="preview" className="text-xs">
-                                  Preview
-                                </TabsTrigger>
-                                <TabsTrigger value="markdown" className="text-xs">
-                                  Markdown
-                                </TabsTrigger>
-                              </TabsList>
-                              <TabsContent value="preview" className="m-0">
-                                <div className="max-h-96 overflow-y-auto pr-1">
-                                  <MarkdownContent markdown={page.content_markdown} variant="accordion" />
-                                </div>
-                              </TabsContent>
-                              <TabsContent value="markdown" className="m-0">
-                                <div className="max-h-96 overflow-y-auto pr-1">
-                                  <RawMarkdown markdown={extractResponseToMarkdown(page)} />
-                                </div>
-                              </TabsContent>
-                            </Tabs>
+                          {page.phase === "pending" ? (
+                            <p className="text-sm text-muted-foreground">Still working on this page...</p>
+                          ) : (
+                            <>
+                              {page.error && (
+                                <Alert variant="destructive">
+                                  <AlertCircle className="size-4" />
+                                  <AlertDescription>{page.error}</AlertDescription>
+                                </Alert>
+                              )}
+                              {!page.content_markdown.trim() && !page.error && (
+                                <p className="text-sm text-muted-foreground">
+                                  No extractable content was found on this page.
+                                </p>
+                              )}
+                              {page.content_markdown.trim() && (
+                                <Tabs defaultValue="preview" className="gap-2">
+                                  <TabsList variant="line" className="h-7">
+                                    <TabsTrigger value="preview" className="text-xs">
+                                      Preview
+                                    </TabsTrigger>
+                                    <TabsTrigger value="markdown" className="text-xs">
+                                      Markdown
+                                    </TabsTrigger>
+                                  </TabsList>
+                                  <TabsContent value="preview" className="m-0">
+                                    <div className="max-h-96 overflow-y-auto pr-1">
+                                      <MarkdownContent markdown={page.content_markdown} variant="accordion" />
+                                    </div>
+                                  </TabsContent>
+                                  <TabsContent value="markdown" className="m-0">
+                                    <div className="max-h-96 overflow-y-auto pr-1">
+                                      <RawMarkdown markdown={extractResponseToMarkdown(page)} />
+                                    </div>
+                                  </TabsContent>
+                                </Tabs>
+                              )}
+                            </>
                           )}
                         </AccordionContent>
                       </AccordionItem>
@@ -384,11 +461,13 @@ function DiscoverAndExtractPageInner() {
                 </CardContent>
               </Card>
             ) : (
-              <EmptyState
-                icon={Workflow}
-                title="No pages extracted"
-                description="Discovery didn't find any pages to extract content from."
-              />
+              finalResult && (
+                <EmptyState
+                  icon={Workflow}
+                  title="No pages extracted"
+                  description="Discovery didn't find any pages to extract content from."
+                />
+              )
             )}
           </div>
         )}

@@ -82,11 +82,40 @@ export interface DiscoverAndExtractResponse {
   shared_content_markdown: string;
 }
 
+// ---- website_processing (streaming) -----------------------------------------
+
+// One JSON object per line (newline-delimited), matching
+// api/routes/website_processing.py's discover_and_extract_stream_route()
+// exactly -- see that route's docstring for why this isn't
+// Server-Sent-Events framing.
+export type DiscoverAndExtractStreamEvent =
+  | { event: "discovery_started" }
+  | { event: "discovery_done"; discovery: DiscoverResponse }
+  | { event: "page_fetched"; url: string; status: "success" | "failed" }
+  | { event: "dedup_done"; shared_content_markdown: string }
+  | { event: "page_rendered"; page: ExtractResponse }
+  | { event: "complete"; result: DiscoverAndExtractResponse };
+
 // ---- request plumbing -------------------------------------------------------
 
 interface ValidationErrorItem {
   loc: (string | number)[];
   msg: string;
+}
+
+async function parseErrorResponse(response: Response): Promise<ApiError> {
+  const payload = await response.json().catch(() => null);
+  if (response.status === 422 && Array.isArray(payload?.detail)) {
+    const messages = (payload.detail as ValidationErrorItem[]).map(
+      (item) => `${item.loc.at(-1)}: ${item.msg}`
+    );
+    return new ApiError(messages.join("; "));
+  }
+  return new ApiError(
+    typeof payload?.detail === "string"
+      ? payload.detail
+      : `Request failed with status ${response.status}`
+  );
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
@@ -104,21 +133,65 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   }
 
   if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    if (response.status === 422 && Array.isArray(payload?.detail)) {
-      const messages = (payload.detail as ValidationErrorItem[]).map(
-        (item) => `${item.loc.at(-1)}: ${item.msg}`
-      );
-      throw new ApiError(messages.join("; "));
-    }
-    throw new ApiError(
-      typeof payload?.detail === "string"
-        ? payload.detail
-        : `Request failed with status ${response.status}`
-    );
+    throw await parseErrorResponse(response);
   }
 
   return response.json() as Promise<T>;
+}
+
+// Streams the same call, one parsed event at a time, via onEvent -- resolves
+// once the stream ends (after the "complete" event) or rejects on a
+// connection/parse failure. See DiscoverAndExtractStreamEvent for the shape.
+export async function discoverAndExtractStream(
+  url: string,
+  maxPages: number,
+  maxDepth: number | null,
+  onEvent: (event: DiscoverAndExtractStreamEvent) => void
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/discover-and-extract/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, max_pages: maxPages, max_depth: maxDepth }),
+    });
+  } catch {
+    throw new ApiError(
+      `Could not reach the backend at ${API_BASE_URL}. Is "uv run uvicorn api.main:app --reload" running?`
+    );
+  }
+
+  if (!response.ok) {
+    throw await parseErrorResponse(response);
+  }
+
+  if (!response.body) {
+    throw new ApiError("The backend did not return a streamable response.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    // The last split segment is either empty (the chunk ended cleanly on a
+    // newline) or a partial line still waiting on more bytes -- either way
+    // it goes back in the buffer, not out to onEvent, until it's complete.
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (line.trim()) onEvent(JSON.parse(line) as DiscoverAndExtractStreamEvent);
+    }
+  }
+
+  if (buffer.trim()) {
+    onEvent(JSON.parse(buffer) as DiscoverAndExtractStreamEvent);
+  }
 }
 
 export function detectTech(url: string): Promise<DetectResponse> {

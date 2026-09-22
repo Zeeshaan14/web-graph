@@ -3,7 +3,7 @@
 # puts THIS file's own folder on sys.path, not the repo root where the
 # url_discovery/ and content_extraction/ sibling packages actually live.
 import sys
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,35 +23,66 @@ from website_processing.shared_content import find_shared_containers, remove_sha
 MAX_CONCURRENT_EXTRACTIONS = 5
 
 
-def discover_and_extract(
+def discover_and_extract_stream(
     start_url: str,
     max_pages: int = 10,
     max_depth: int | None = None,
 ):
+    """The real implementation, as a generator of progress events --
+    discover_and_extract() below is just this, exhausted for its final
+    "complete" event. Split out because the old single "wait for
+    everything, then return one dict" shape gives a caller nothing to show
+    while a multi-page crawl is running, which is the whole reason this
+    exists: an event per real milestone (discovery finishing, each page's
+    fetch finishing, dedup finishing, each page's final render finishing),
+    not a fake progress bar.
+
+    Every event is {"event": <name>, ...}. In order:
+      discovery_started
+      discovery_done   {discovery}
+      page_fetched     {url, status}  -- one per page, as fetch_and_prepare()
+                                          actually completes (real concurrent
+                                          order, not discovery order)
+      dedup_done       {shared_content_markdown}
+      page_rendered    {page}         -- one per page, final ExtractResponse-
+                                          shaped dict, AFTER dedup has
+                                          stripped shared content from it
+      complete         {result}       -- the exact same shape
+                                          discover_and_extract() has always
+                                          returned
+    """
+    yield {"event": "discovery_started"}
+
     discovery_result = discover_urls(
         start_url=start_url,
         max_pages=max_pages,
         max_depth=max_depth,
     )
 
+    yield {"event": "discovery_done", "discovery": discovery_result}
+
     if discovery_result["status"] == "failed":
-        return {
+        result = {
             "status": "failed",
             "start_url": start_url,
             "discovery": discovery_result,
             "pages": [],
             "shared_content_markdown": "",
         }
+        yield {"event": "complete", "result": result}
+        return
 
     urls = discovery_result["discovered_urls"]
+    prepared_by_url = {}
 
     if urls:
-        # ThreadPoolExecutor.map() is the right tool for bounded-concurrent
-        # I/O-bound work in a synchronous codebase -- fetch_and_prepare()
-        # spends nearly all its time blocked on network I/O, so threads
-        # (not asyncio, not multiprocessing) give real overlap without a
-        # rewrite. map() guarantees the RESULT order matches url order
-        # even though the underlying calls can complete in any order.
+        # submit() + as_completed(), not map() -- map() only ever hands
+        # back results once ALL of them are done (it's just a for loop
+        # over an ordered iterator of futures), which is exactly the "wait
+        # for everything" shape this function exists to avoid. Concurrency
+        # itself is identical either way: a ThreadPoolExecutor(max_workers=N)
+        # runs at most N at once regardless of which of these submits all
+        # the work upfront.
         #
         # fetch_and_prepare() stops short of converting to Markdown on
         # purpose -- shared nav/sidebar/footer content needs to be found
@@ -59,9 +90,22 @@ def discover_and_extract(
         # page's Markdown gets rendered, not after (there's no structure
         # left to detect or preserve in flat text).
         with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_EXTRACTIONS, len(urls))) as executor:
-            prepared = list(executor.map(fetch_and_prepare, urls))
-    else:
-        prepared = []
+            future_to_url = {executor.submit(fetch_and_prepare, url): url for url in urls}
+            for future in as_completed(future_to_url):
+                # Keyed by the URL WE submitted (future_to_url), not by
+                # whatever url field the result itself carries -- in real
+                # use fetch_and_prepare() always echoes its own input back,
+                # but nothing here should have to assume that.
+                submitted_url = future_to_url[future]
+                page = future.result()
+                prepared_by_url[submitted_url] = page
+                yield {"event": "page_fetched", "url": submitted_url, "status": page["status"]}
+
+    # Back into discovery order -- as_completed() above yields in whatever
+    # order threads actually finished in, but the final `pages` list (and
+    # every page_rendered event below) keeps the same order guarantee
+    # executor.map() used to give directly.
+    prepared = [prepared_by_url[url] for url in urls]
 
     successful = [page for page in prepared if page["status"] == "success"]
 
@@ -70,9 +114,9 @@ def discover_and_extract(
 
     # Rendered BEFORE any pruning below -- each representative Tag is a
     # live reference into one of the pages' own body trees, and that same
-    # page gets pruned in the loop right after this: converting it to
-    # Markdown first avoids handing render_markdown() an already-emptied
-    # (decompose()'d) tag.
+    # page gets pruned right after this: converting it to Markdown first
+    # avoids handing render_markdown() an already-emptied (decompose()'d)
+    # tag.
     shared_content_markdown = "\n\n---\n\n".join(
         render_markdown(container) for container in shared_containers
     )
@@ -80,24 +124,28 @@ def discover_and_extract(
     for page in successful:
         remove_shared_containers(page["body"], shared_signatures)
 
-    pages = [
-        {
-            "status": "success",
-            "url": page["url"],
-            "title": page["title"],
-            "content_markdown": render_markdown(page["body"]),
-            "error": None,
-        }
-        if page["status"] == "success"
-        else {
-            "status": "failed",
-            "url": page["url"],
-            "title": None,
-            "content_markdown": "",
-            "error": page["error"],
-        }
-        for page in prepared
-    ]
+    yield {"event": "dedup_done", "shared_content_markdown": shared_content_markdown}
+
+    pages = []
+    for page in prepared:
+        if page["status"] == "success":
+            rendered = {
+                "status": "success",
+                "url": page["url"],
+                "title": page["title"],
+                "content_markdown": render_markdown(page["body"]),
+                "error": None,
+            }
+        else:
+            rendered = {
+                "status": "failed",
+                "url": page["url"],
+                "title": None,
+                "content_markdown": "",
+                "error": page["error"],
+            }
+        pages.append(rendered)
+        yield {"event": "page_rendered", "page": rendered}
 
     # pages is guaranteed non-empty here: discover_urls() only reports
     # "success"/"partial" (never "failed", handled above) when at least
@@ -118,13 +166,31 @@ def discover_and_extract(
         # succeeded -- the only remaining combination.
         status = "success"
 
-    return {
+    result = {
         "status": status,
         "start_url": start_url,
         "discovery": discovery_result,
         "pages": pages,
         "shared_content_markdown": shared_content_markdown,
     }
+
+    yield {"event": "complete", "result": result}
+
+
+def discover_and_extract(
+    start_url: str,
+    max_pages: int = 10,
+    max_depth: int | None = None,
+):
+    """Non-streaming convenience wrapper, same contract this had before
+    streaming existed -- exhausts discover_and_extract_stream() and
+    returns just its final result. Used by anything that doesn't care
+    about progress (tests, the __main__ block below, any future non-HTTP
+    caller)."""
+    for event in discover_and_extract_stream(start_url, max_pages, max_depth):
+        if event["event"] == "complete":
+            return event["result"]
+
 
 def _safe_for_console(value):
     """Recursively replaces characters a Windows terminal's default cp1252
@@ -143,9 +209,5 @@ def _safe_for_console(value):
 
 
 if __name__ == "__main__":
-    result = discover_and_extract(
-        "https://lakshx.in/",
-        max_pages=5,
-    )
-
-    print(_safe_for_console(result))
+    for event in discover_and_extract_stream("https://lakshx.in/", max_pages=5):
+        print(_safe_for_console(event))

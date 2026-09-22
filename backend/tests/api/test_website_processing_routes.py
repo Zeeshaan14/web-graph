@@ -1,8 +1,9 @@
 # Tests the API layer only: request validation and response passthrough.
-# Mocks discover_and_extract() entirely -- this file must NOT exercise
-# real discovery/extraction/status-combination logic (that's
-# website_processing's own suite's job).
+# Mocks discover_and_extract()/discover_and_extract_stream() entirely --
+# this file must NOT exercise real discovery/extraction/status-combination
+# logic (that's website_processing's own suite's job).
 
+import json
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -122,3 +123,65 @@ class TestDiscoverAndExtractRoute:
         body = response.json()
         assert body["discovery"]["discovered_urls"] == SUCCESS_RESULT["discovery"]["discovered_urls"]
         assert body["pages"] == SUCCESS_RESULT["pages"]
+
+
+STREAM_EVENTS = [
+    {"event": "discovery_started"},
+    {"event": "discovery_done", "discovery": SUCCESS_RESULT["discovery"]},
+    {"event": "page_fetched", "url": "https://example.com/", "status": "success"},
+    {"event": "page_fetched", "url": "https://example.com/about/", "status": "success"},
+    {"event": "dedup_done", "shared_content_markdown": ""},
+    {"event": "page_rendered", "page": SUCCESS_RESULT["pages"][0]},
+    {"event": "page_rendered", "page": SUCCESS_RESULT["pages"][1]},
+    {"event": "complete", "result": SUCCESS_RESULT},
+]
+
+
+class TestDiscoverAndExtractStreamRoute:
+    def test_calls_discover_and_extract_stream_with_submitted_params(self):
+        with patch(
+            "api.routes.website_processing.discover_and_extract_stream", return_value=iter(STREAM_EVENTS)
+        ) as mock_call:
+            response = client.post(
+                "/discover-and-extract/stream",
+                json={"url": "https://example.com/", "max_pages": 20, "max_depth": 2},
+            )
+
+        mock_call.assert_called_once_with("https://example.com/", max_pages=20, max_depth=2)
+        assert response.status_code == 200
+
+    def test_response_is_one_json_object_per_line_in_order(self):
+        with patch(
+            "api.routes.website_processing.discover_and_extract_stream", return_value=iter(STREAM_EVENTS)
+        ):
+            response = client.post("/discover-and-extract/stream", json={"url": "https://example.com/"})
+
+        lines = [line for line in response.text.splitlines() if line.strip()]
+        parsed = [json.loads(line) for line in lines]
+        assert parsed == STREAM_EVENTS
+
+    def test_content_type_is_ndjson(self):
+        with patch(
+            "api.routes.website_processing.discover_and_extract_stream", return_value=iter(STREAM_EVENTS)
+        ):
+            response = client.post("/discover-and-extract/stream", json={"url": "https://example.com/"})
+
+        assert response.headers["content-type"] == "application/x-ndjson"
+
+    def test_final_line_is_a_complete_event_with_the_full_result(self):
+        with patch(
+            "api.routes.website_processing.discover_and_extract_stream", return_value=iter(STREAM_EVENTS)
+        ):
+            response = client.post("/discover-and-extract/stream", json={"url": "https://example.com/"})
+
+        lines = [line for line in response.text.splitlines() if line.strip()]
+        last_event = json.loads(lines[-1])
+        assert last_event["event"] == "complete"
+        assert last_event["result"] == SUCCESS_RESULT
+
+    def test_missing_url_is_rejected_before_streaming_starts(self):
+        with patch("api.routes.website_processing.discover_and_extract_stream") as mock_call:
+            response = client.post("/discover-and-extract/stream", json={})
+
+        mock_call.assert_not_called()
+        assert response.status_code == 422

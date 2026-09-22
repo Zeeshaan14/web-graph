@@ -13,7 +13,11 @@ from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
-from website_processing.pipeline import MAX_CONCURRENT_EXTRACTIONS, discover_and_extract
+from website_processing.pipeline import (
+    MAX_CONCURRENT_EXTRACTIONS,
+    discover_and_extract,
+    discover_and_extract_stream,
+)
 
 DISCOVER_TARGET = "website_processing.pipeline.discover_urls"
 EXTRACT_TARGET = "website_processing.pipeline.fetch_and_prepare"
@@ -313,3 +317,109 @@ class TestParallelExtraction:
         mock_extract.assert_not_called()
         assert result["status"] == "failed"
         assert result["pages"] == []
+
+
+class TestStreamingEvents:
+    """discover_and_extract() (tested everywhere above) is just this
+    generator exhausted for its final event -- these tests are about the
+    events themselves: which ones fire, in what order, carrying what."""
+
+    def test_event_sequence_for_a_successful_two_page_crawl(self):
+        disc = discovery("success", ["a", "b"])
+        pages = {
+            "a": page("success", url="a", body_html="<p>A</p>"),
+            "b": page("success", url="b", body_html="<p>B</p>"),
+        }
+
+        with patch(DISCOVER_TARGET, return_value=disc), \
+             patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
+            events = list(discover_and_extract_stream("https://example.com/"))
+
+        event_names = [e["event"] for e in events]
+        assert event_names == [
+            "discovery_started",
+            "discovery_done",
+            "page_fetched",
+            "page_fetched",
+            "dedup_done",
+            "page_rendered",
+            "page_rendered",
+            "complete",
+        ]
+
+    def test_discovery_done_carries_the_discovery_result(self):
+        disc = discovery("success", ["a"])
+        with patch(DISCOVER_TARGET, return_value=disc), \
+             patch(EXTRACT_TARGET, return_value=page("success", url="a")):
+            events = list(discover_and_extract_stream("https://example.com/"))
+
+        discovery_done = next(e for e in events if e["event"] == "discovery_done")
+        assert discovery_done["discovery"] == disc
+
+    def test_page_fetched_fires_once_per_url_with_its_status(self):
+        disc = discovery("success", ["a", "b"])
+        pages = {
+            "a": page("success", url="a"),
+            "b": page("failed", url="b", error="404"),
+        }
+
+        with patch(DISCOVER_TARGET, return_value=disc), \
+             patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
+            events = list(discover_and_extract_stream("https://example.com/"))
+
+        fetched = {(e["url"], e["status"]) for e in events if e["event"] == "page_fetched"}
+        assert fetched == {("a", "success"), ("b", "failed")}
+
+    def test_page_rendered_carries_shared_content_already_stripped(self):
+        disc = discovery("success", ["a", "b", "c"])
+        nav = '<nav><a href="https://example.com/">Home</a><a href="https://example.com/x">X</a></nav>'
+        pages = {
+            "a": page("success", url="a", body_html=f"{nav}<p>A body.</p>"),
+            "b": page("success", url="b", body_html=f"{nav}<p>B body.</p>"),
+            "c": page("success", url="c", body_html=f"{nav}<p>C body.</p>"),
+        }
+
+        with patch(DISCOVER_TARGET, return_value=disc), \
+             patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
+            events = list(discover_and_extract_stream("https://example.com/"))
+
+        rendered = [e["page"] for e in events if e["event"] == "page_rendered"]
+        assert len(rendered) == 3
+        for p in rendered:
+            assert "[Home]" not in p["content_markdown"]
+
+        dedup_done = next(e for e in events if e["event"] == "dedup_done")
+        assert "[Home](https://example.com/)" in dedup_done["shared_content_markdown"]
+
+    def test_complete_result_matches_the_non_streaming_return_value(self):
+        # Keyed by the ACTUAL url each concurrent call receives, not a
+        # positional side_effect list -- with real concurrent execution,
+        # which thread's call reaches a positional list first isn't
+        # deterministic, so a keyed lookup is what makes this comparison
+        # reliable rather than occasionally flaky.
+        disc = discovery("success", ["a", "b"])
+        pages = {
+            "a": page("success", url="a", body_html="<p>A</p>"),
+            "b": page("failed", url="b", error="timeout"),
+        }
+
+        with patch(DISCOVER_TARGET, return_value=disc), \
+             patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
+            events = list(discover_and_extract_stream("https://example.com/"))
+
+        with patch(DISCOVER_TARGET, return_value=disc), \
+             patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
+            direct_result = discover_and_extract("https://example.com/")
+
+        streamed_result = next(e for e in events if e["event"] == "complete")["result"]
+        assert streamed_result == direct_result
+
+    def test_discovery_failure_short_circuits_straight_to_complete(self):
+        disc = discovery("failed", [], errors=[{"url": "https://example.com/", "error": "timeout"}])
+
+        with patch(DISCOVER_TARGET, return_value=disc), patch(EXTRACT_TARGET) as mock_extract:
+            events = list(discover_and_extract_stream("https://example.com/"))
+
+        mock_extract.assert_not_called()
+        assert [e["event"] for e in events] == ["discovery_started", "discovery_done", "complete"]
+        assert events[-1]["result"]["status"] == "failed"
