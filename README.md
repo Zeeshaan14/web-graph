@@ -14,6 +14,7 @@ and extraction together:
 | URL discovery | V1 done | `POST /discover-urls` |
 | Content extraction | V1 done | `POST /extract-content` |
 | Discover + extract (combined) | V1 done | `POST /discover-and-extract` |
+| Discover + extract (streaming) | V1 done | `POST /discover-and-extract/stream` |
 | Frontend (Next.js) | V1 done | `frontend/` -- one page per feature |
 
 "V1 done" means each one works end to end and is regression-tested — not that
@@ -102,6 +103,13 @@ detected at all below `MIN_DETECTION_SCORE` (40).
   implies React), kept strictly separate from real evidence
 - Structured `success` / `partial` / `failed` outcomes; `detect_website_technologies()`
   never raises
+- Human-readable error messages, not a raw exception repr — a DNS failure
+  (`requests`' own `NameResolutionError`/`getaddrinfo failed`) becomes
+  `"Could not resolve '<url>' -- check the domain and try again."`, any
+  other connection failure becomes `"Could not connect to '<url>'."`. The
+  same classifier is duplicated (not imported) into `url_discovery/crawler.py`
+  and `content_extraction/content_extraction.py`, matching this codebase's
+  existing convention of keeping each feature package self-contained
 - `POST /detect-tech`
 
 ### What V1 does *not* promise yet
@@ -347,6 +355,22 @@ logic itself — just orchestration and status combination.
   extracted pages before this runs at all; a single-page crawl is never
   touched
 - `POST /discover-and-extract`
+- `POST /discover-and-extract/stream` — the same workflow, as newline-
+  delimited JSON (one `{"event": ..., ...}` object per line) instead of one
+  final response. `discover_and_extract_stream()` wraps `discover_urls_stream()`
+  and `extract_content()`'s per-page work as a generator, so a caller sees
+  progress as it actually happens rather than one blocking wait:
+  `discovery_started` -> a `url_discovered` event for each URL the crawl
+  finds (not batched until the crawl finishes) -> `discovery_done` -> a
+  `page_fetched` event per page as extraction completes it -> `dedup_done`
+  once shared-content removal runs -> a `page_rendered` event per page's
+  final Markdown -> `complete` with the same result shape
+  `/discover-and-extract` returns non-streamed. `/discover-and-extract`
+  itself is a thin wrapper that exhausts the same generator for its
+  `complete` event — one implementation, two ways to consume it. This is
+  what the frontend's Discover + Extract page actually uses (see Frontend
+  section below); the plain endpoint still exists for callers that just
+  want the final result in one response.
 
 ### What V1 does *not* promise yet
 
@@ -461,12 +485,21 @@ deployed-service one.
 **What V1 actually supports:** all four workflows end to end against real
 sites, loading/error states (network failure, validation errors, non-2xx
 responses) surfaced as toasts, and a responsive layout down to phone width.
+The Discover + Extract page specifically drives `/discover-and-extract/stream`
+(`frontend/src/lib/api.ts`'s `discoverAndExtractStream()` -- `fetch()` +
+`ReadableStream` reader, manually line-buffered across chunk boundaries) and
+renders each URL, page, and the dedup pass as it actually streams in, instead
+of a single spinner-then-everything-at-once wait. Every URL field across all
+four pages also accepts a bare domain (`lakshx.in`, not just
+`https://lakshx.in`) or a partial scheme (`www.example.com`) --
+`frontend/src/lib/url.ts`'s `normalizeUrlInput()` adds `https://` before the
+request goes out, so the native `type="url"` input (which rejects anything
+without a scheme at the browser level) had to be swapped for `type="text"` +
+`inputMode="url"` everywhere a URL is entered.
 
 **What V1 does *not* promise yet:** no auth, no persistence of past
-results (a refresh loses them), no polling/streaming for the slower
-discover-and-extract workflow (the request just blocks until it's done), and
-no automated frontend tests -- it was verified with a live smoke test against
-a real site instead.
+results (a refresh loses them), and no automated frontend tests -- it was
+verified with a live smoke test against a real site instead.
 
 ## Running it
 
