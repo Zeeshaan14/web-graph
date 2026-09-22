@@ -2,6 +2,8 @@
 // schemas in api/schemas/*.py exactly -- this file has no business logic of
 // its own, same principle the backend's own api/ layer follows.
 
+import { crawlScopeOptionsToRequestFields, type CrawlScopeOptions } from "./crawl-options";
+
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
@@ -147,14 +149,20 @@ export async function discoverAndExtractStream(
   url: string,
   maxPages: number,
   maxDepth: number | null,
-  onEvent: (event: DiscoverAndExtractStreamEvent) => void
+  onEvent: (event: DiscoverAndExtractStreamEvent) => void,
+  scopeOptions?: CrawlScopeOptions
 ): Promise<void> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE_URL}/discover-and-extract/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, max_pages: maxPages, max_depth: maxDepth }),
+      body: JSON.stringify({
+        url,
+        max_pages: maxPages,
+        max_depth: maxDepth,
+        ...(scopeOptions ? crawlScopeOptionsToRequestFields(scopeOptions) : {}),
+      }),
     });
   } catch {
     throw new ApiError(
@@ -202,12 +210,14 @@ export function detectTech(url: string): Promise<DetectResponse> {
 export function discoverUrls(
   url: string,
   maxPages: number,
-  maxDepth: number | null
+  maxDepth: number | null,
+  scopeOptions?: CrawlScopeOptions
 ): Promise<DiscoverResponse> {
   return postJson<DiscoverResponse>("/discover-urls", {
     url,
     max_pages: maxPages,
     max_depth: maxDepth,
+    ...(scopeOptions ? crawlScopeOptionsToRequestFields(scopeOptions) : {}),
   });
 }
 
@@ -218,12 +228,14 @@ export function extractContent(url: string): Promise<ExtractResponse> {
 export function discoverAndExtract(
   url: string,
   maxPages: number,
-  maxDepth: number | null
+  maxDepth: number | null,
+  scopeOptions?: CrawlScopeOptions
 ): Promise<DiscoverAndExtractResponse> {
   return postJson<DiscoverAndExtractResponse>("/discover-and-extract", {
     url,
     max_pages: maxPages,
     max_depth: maxDepth,
+    ...(scopeOptions ? crawlScopeOptionsToRequestFields(scopeOptions) : {}),
   });
 }
 

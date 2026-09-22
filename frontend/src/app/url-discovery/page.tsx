@@ -17,11 +17,13 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { CrawlOptionsPanel } from "@/components/crawl-options-panel";
 import { EmptyState } from "@/components/empty-state";
 import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, discoverUrls, type DiscoverResponse } from "@/lib/api";
+import { DEFAULT_CRAWL_SCOPE_OPTIONS, type CrawlScopeOptions } from "@/lib/crawl-options";
 import { normalizeUrlInput } from "@/lib/url";
 
 function UrlDiscoveryForm({
@@ -31,6 +33,8 @@ function UrlDiscoveryForm({
   setMaxPages,
   maxDepth,
   setMaxDepth,
+  scopeOptions,
+  setScopeOptions,
   loading,
   onSubmit,
 }: {
@@ -40,6 +44,8 @@ function UrlDiscoveryForm({
   setMaxPages: (value: string) => void;
   maxDepth: string;
   setMaxDepth: (value: string) => void;
+  scopeOptions: CrawlScopeOptions;
+  setScopeOptions: (value: CrawlScopeOptions) => void;
   loading: boolean;
   onSubmit: (event: React.FormEvent) => void;
 }) {
@@ -100,6 +106,7 @@ function UrlDiscoveryForm({
           />
         </div>
       </div>
+      <CrawlOptionsPanel options={scopeOptions} onChange={setScopeOptions} />
     </form>
   );
 }
@@ -109,6 +116,7 @@ function UrlDiscoveryPageInner() {
   const [url, setUrl] = useState(() => searchParams.get("url") ?? "");
   const [maxPages, setMaxPages] = useState("10");
   const [maxDepth, setMaxDepth] = useState("");
+  const [scopeOptions, setScopeOptions] = useState<CrawlScopeOptions>(DEFAULT_CRAWL_SCOPE_OPTIONS);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<DiscoverResponse | null>(null);
   const autoRan = useRef(false);
@@ -121,7 +129,8 @@ function UrlDiscoveryPageInner() {
       const response = await discoverUrls(
         normalizeUrlInput(targetUrl),
         Number(maxPages) || 10,
-        maxDepth.trim() === "" ? null : Number(maxDepth)
+        maxDepth.trim() === "" ? null : Number(maxDepth),
+        scopeOptions
       );
       setResult(response);
     } catch (error) {
@@ -170,6 +179,8 @@ function UrlDiscoveryPageInner() {
           setMaxPages={setMaxPages}
           maxDepth={maxDepth}
           setMaxDepth={setMaxDepth}
+          scopeOptions={scopeOptions}
+          setScopeOptions={setScopeOptions}
           loading={loading}
           onSubmit={handleSubmit}
         />

@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { CrawlOptionsPanel } from "@/components/crawl-options-panel";
 import { EmptyState } from "@/components/empty-state";
 import { MarkdownContent, RawMarkdown } from "@/components/markdown-content";
 import { PageHero } from "@/components/page-hero";
@@ -35,6 +36,7 @@ import {
   type DiscoverResponse,
   type ExtractResponse,
 } from "@/lib/api";
+import { DEFAULT_CRAWL_SCOPE_OPTIONS, type CrawlScopeOptions } from "@/lib/crawl-options";
 import { downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
 import { normalizeUrlInput } from "@/lib/url";
 
@@ -51,6 +53,8 @@ function DiscoverAndExtractForm({
   setMaxPages,
   maxDepth,
   setMaxDepth,
+  scopeOptions,
+  setScopeOptions,
   loading,
   onSubmit,
 }: {
@@ -60,6 +64,8 @@ function DiscoverAndExtractForm({
   setMaxPages: (value: string) => void;
   maxDepth: string;
   setMaxDepth: (value: string) => void;
+  scopeOptions: CrawlScopeOptions;
+  setScopeOptions: (value: CrawlScopeOptions) => void;
   loading: boolean;
   onSubmit: (event: React.FormEvent) => void;
 }) {
@@ -120,6 +126,7 @@ function DiscoverAndExtractForm({
           />
         </div>
       </div>
+      <CrawlOptionsPanel options={scopeOptions} onChange={setScopeOptions} />
     </form>
   );
 }
@@ -129,6 +136,7 @@ function DiscoverAndExtractPageInner() {
   const [url, setUrl] = useState(() => searchParams.get("url") ?? "");
   const [maxPages, setMaxPages] = useState("5");
   const [maxDepth, setMaxDepth] = useState("");
+  const [scopeOptions, setScopeOptions] = useState<CrawlScopeOptions>(DEFAULT_CRAWL_SCOPE_OPTIONS);
   const [loading, setLoading] = useState(false);
   const [zipping, setZipping] = useState(false);
   const autoRan = useRef(false);
@@ -196,7 +204,8 @@ function DiscoverAndExtractPageInner() {
               setFinalResult(event.result);
               break;
           }
-        }
+        },
+        scopeOptions
       );
     } catch (error) {
       toast.error(error instanceof ApiError ? error.message : "Something went wrong.");
@@ -273,6 +282,8 @@ function DiscoverAndExtractPageInner() {
           setMaxPages={setMaxPages}
           maxDepth={maxDepth}
           setMaxDepth={setMaxDepth}
+          scopeOptions={scopeOptions}
+          setScopeOptions={setScopeOptions}
           loading={loading}
           onSubmit={handleSubmit}
         />
