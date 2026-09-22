@@ -27,6 +27,14 @@ def discover_and_extract_stream(
     start_url: str,
     max_pages: int = 10,
     max_depth: int | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+    regex_on_full_url: bool = False,
+    restrict_to_start_path: bool = False,
+    allow_subdomains: bool = False,
+    allow_external_links: bool = False,
+    ignore_query_parameters: bool = False,
+    ignore_robots_txt: bool = False,
 ):
     """The real implementation, as a generator of progress events --
     discover_and_extract() below is just this, exhausted for its final
@@ -54,6 +62,13 @@ def discover_and_extract_stream(
       complete         {result}       -- the exact same shape
                                           discover_and_extract() has always
                                           returned
+
+    include_paths / exclude_paths / regex_on_full_url / restrict_to_start_path /
+    allow_subdomains / allow_external_links / ignore_query_parameters /
+    ignore_robots_txt are forwarded straight to discover_urls_stream() --
+    see url_discovery.crawler.crawl_stream() for what each one does. This
+    function owns no scope-decision logic of its own; it only orchestrates
+    discovery + extraction + dedup.
     """
     yield {"event": "discovery_started"}
 
@@ -62,6 +77,14 @@ def discover_and_extract_stream(
         start_url=start_url,
         max_pages=max_pages,
         max_depth=max_depth,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        regex_on_full_url=regex_on_full_url,
+        restrict_to_start_path=restrict_to_start_path,
+        allow_subdomains=allow_subdomains,
+        allow_external_links=allow_external_links,
+        ignore_query_parameters=ignore_query_parameters,
+        ignore_robots_txt=ignore_robots_txt,
     ):
         if event["event"] == "url_discovered":
             yield event
@@ -190,13 +213,33 @@ def discover_and_extract(
     start_url: str,
     max_pages: int = 10,
     max_depth: int | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+    regex_on_full_url: bool = False,
+    restrict_to_start_path: bool = False,
+    allow_subdomains: bool = False,
+    allow_external_links: bool = False,
+    ignore_query_parameters: bool = False,
+    ignore_robots_txt: bool = False,
 ):
     """Non-streaming convenience wrapper, same contract this had before
     streaming existed -- exhausts discover_and_extract_stream() and
     returns just its final result. Used by anything that doesn't care
     about progress (tests, the __main__ block below, any future non-HTTP
     caller)."""
-    for event in discover_and_extract_stream(start_url, max_pages, max_depth):
+    for event in discover_and_extract_stream(
+        start_url,
+        max_pages,
+        max_depth,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        regex_on_full_url=regex_on_full_url,
+        restrict_to_start_path=restrict_to_start_path,
+        allow_subdomains=allow_subdomains,
+        allow_external_links=allow_external_links,
+        ignore_query_parameters=ignore_query_parameters,
+        ignore_robots_txt=ignore_robots_txt,
+    ):
         if event["event"] == "complete":
             return event["result"]
 

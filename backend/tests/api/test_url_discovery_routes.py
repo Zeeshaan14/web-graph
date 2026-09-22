@@ -29,6 +29,21 @@ PARTIAL_RESULT = {
     "errors": [{"url": "https://example.com/old-page/", "error": "404 Client Error"}],
 }
 
+# The default value of every new crawl-scope option -- appended to an
+# expected discover_urls() call whenever a test doesn't submit any of
+# them itself, so this file doesn't have to spell out all eight on every
+# unrelated assertion.
+DEFAULT_SCOPE_KWARGS = {
+    "include_paths": None,
+    "exclude_paths": None,
+    "regex_on_full_url": False,
+    "restrict_to_start_path": False,
+    "allow_subdomains": False,
+    "allow_external_links": False,
+    "ignore_query_parameters": False,
+    "ignore_robots_txt": False,
+}
+
 
 class TestDiscoverUrlsRoute:
     def test_calls_discover_urls_with_submitted_params_and_returns_its_result(self):
@@ -44,6 +59,7 @@ class TestDiscoverUrlsRoute:
             max_depth=2,
             path_specific_strip=None,
             timeout_seconds=60.0,
+            **DEFAULT_SCOPE_KWARGS,
         )
         assert response.status_code == 200
         assert response.json()["status"] == "success"
@@ -59,6 +75,7 @@ class TestDiscoverUrlsRoute:
             max_depth=None,
             path_specific_strip=None,
             timeout_seconds=60.0,
+            **DEFAULT_SCOPE_KWARGS,
         )
 
     def test_passes_through_a_partial_result_as_200_not_500(self):
@@ -119,6 +136,7 @@ class TestDiscoverUrlsRoute:
             max_depth=None,
             path_specific_strip=None,
             timeout_seconds=60.0,
+            **DEFAULT_SCOPE_KWARGS,
         )
         assert response.status_code == 200
 
@@ -186,3 +204,59 @@ class TestPathSpecificStripValidation:
         forwarded = mock_discover.call_args.kwargs["path_specific_strip"]
         assert forwarded == {"/feedback/": {"d", "ref"}}
         assert isinstance(forwarded["/feedback/"], set)
+
+
+class TestScopeControlOptions:
+    def test_defaults_match_prior_behavior(self):
+        with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
+            client.post("/discover-urls", json={"url": "https://example.com/"})
+
+        for key, value in DEFAULT_SCOPE_KWARGS.items():
+            assert mock_discover.call_args.kwargs[key] == value
+
+    def test_submitted_scope_options_are_forwarded(self):
+        with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
+            client.post(
+                "/discover-urls",
+                json={
+                    "url": "https://example.com/",
+                    "include_paths": ["^/blog/"],
+                    "exclude_paths": ["draft"],
+                    "regex_on_full_url": True,
+                    "restrict_to_start_path": True,
+                    "allow_subdomains": True,
+                    "allow_external_links": True,
+                    "ignore_query_parameters": True,
+                    "ignore_robots_txt": True,
+                },
+            )
+
+        kwargs = mock_discover.call_args.kwargs
+        assert kwargs["include_paths"] == ["^/blog/"]
+        assert kwargs["exclude_paths"] == ["draft"]
+        assert kwargs["regex_on_full_url"] is True
+        assert kwargs["restrict_to_start_path"] is True
+        assert kwargs["allow_subdomains"] is True
+        assert kwargs["allow_external_links"] is True
+        assert kwargs["ignore_query_parameters"] is True
+        assert kwargs["ignore_robots_txt"] is True
+
+    def test_invalid_include_paths_regex_is_rejected_before_discover_urls_is_called(self):
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls",
+                json={"url": "https://example.com/", "include_paths": ["(unclosed"]},
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422
+
+    def test_invalid_exclude_paths_regex_is_rejected_before_discover_urls_is_called(self):
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls",
+                json={"url": "https://example.com/", "exclude_paths": ["(unclosed"]},
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422

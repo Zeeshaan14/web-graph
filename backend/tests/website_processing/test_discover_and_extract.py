@@ -144,7 +144,35 @@ class TestOrchestration:
             discover_and_extract("https://example.com/", max_pages=25, max_depth=3)
 
         mock_discover.assert_called_once_with(
-            start_url="https://example.com/", max_pages=25, max_depth=3
+            start_url="https://example.com/", max_pages=25, max_depth=3,
+            include_paths=None, exclude_paths=None, regex_on_full_url=False,
+            restrict_to_start_path=False, allow_subdomains=False,
+            allow_external_links=False, ignore_query_parameters=False,
+            ignore_robots_txt=False,
+        )
+
+    def test_discover_urls_receives_the_new_scope_control_options(self):
+        disc = discovery("success", ["a"])
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)) as mock_discover, \
+             patch(EXTRACT_TARGET, return_value=page("success")):
+            discover_and_extract(
+                "https://example.com/",
+                include_paths=["^/blog/"],
+                exclude_paths=["draft"],
+                regex_on_full_url=True,
+                restrict_to_start_path=True,
+                allow_subdomains=True,
+                allow_external_links=True,
+                ignore_query_parameters=True,
+                ignore_robots_txt=True,
+            )
+
+        mock_discover.assert_called_once_with(
+            start_url="https://example.com/", max_pages=10, max_depth=None,
+            include_paths=["^/blog/"], exclude_paths=["draft"], regex_on_full_url=True,
+            restrict_to_start_path=True, allow_subdomains=True,
+            allow_external_links=True, ignore_query_parameters=True,
+            ignore_robots_txt=True,
         )
 
     def test_discovery_field_carries_the_raw_discovery_result_verbatim(self):

@@ -14,12 +14,26 @@ from ..schemas.website_processing import DiscoverAndExtractRequest, DiscoverAndE
 router = APIRouter()
 
 
+def _crawl_scope_kwargs(request: DiscoverAndExtractRequest) -> dict:
+    return {
+        "include_paths": request.include_paths,
+        "exclude_paths": request.exclude_paths,
+        "regex_on_full_url": request.regex_on_full_url,
+        "restrict_to_start_path": request.restrict_to_start_path,
+        "allow_subdomains": request.allow_subdomains,
+        "allow_external_links": request.allow_external_links,
+        "ignore_query_parameters": request.ignore_query_parameters,
+        "ignore_robots_txt": request.ignore_robots_txt,
+    }
+
+
 @router.post("/discover-and-extract", response_model=DiscoverAndExtractResponse)
 def discover_and_extract_route(request: DiscoverAndExtractRequest) -> DiscoverAndExtractResponse:
     result = discover_and_extract(
         request.url,
         max_pages=request.max_pages,
         max_depth=request.max_depth,
+        **_crawl_scope_kwargs(request),
     )
     return DiscoverAndExtractResponse(**result)
 
@@ -42,6 +56,7 @@ def discover_and_extract_stream_route(request: DiscoverAndExtractRequest) -> Str
             request.url,
             max_pages=request.max_pages,
             max_depth=request.max_depth,
+            **_crawl_scope_kwargs(request),
         ):
             yield json.dumps(event) + "\n"
 

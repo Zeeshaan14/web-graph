@@ -11,7 +11,32 @@
 # Capping both here is the API layer doing its actual job: validating
 # the request before it ever reaches the crawler.
 
-from pydantic import BaseModel, Field
+import re
+
+from pydantic import BaseModel, Field, field_validator
+
+# A generous cap on how many regex patterns one request can supply --
+# matches Firecrawl's own includePaths/excludePaths limit (1000 patterns).
+# Not about trusting the caller's regex complexity (that's ReDoS territory
+# regardless of count), just a sane bound on request size.
+MAX_PATH_PATTERNS = 1000
+
+
+def _validate_path_patterns(patterns: list[str] | None) -> list[str] | None:
+    """Compiling here, at the API boundary, means a bad regex fails fast
+    with a clean 422 instead of surfacing deep inside a crawl -- same
+    principle as max_pages/timeout_seconds being validated in this file
+    rather than left to the crawler itself."""
+    if patterns is None:
+        return None
+    if len(patterns) > MAX_PATH_PATTERNS:
+        raise ValueError(f"at most {MAX_PATH_PATTERNS} patterns allowed, got {len(patterns)}")
+    for pattern in patterns:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"'{pattern}' is not a valid regex: {exc}") from exc
+    return patterns
 
 
 class DiscoverRequest(BaseModel):
@@ -40,6 +65,40 @@ class DiscoverRequest(BaseModel):
             "discover_urls() -- see url_discovery.link_extraction.normalize_url()."
         ),
     )
+    include_paths: list[str] | None = Field(
+        default=None,
+        description="Regex patterns -- only a discovered link matching at least one is queued.",
+    )
+    exclude_paths: list[str] | None = Field(
+        default=None,
+        description="Regex patterns -- a discovered link matching any of these is never queued, even if it also matches include_paths.",
+    )
+    regex_on_full_url: bool = Field(
+        default=False,
+        description="Match include_paths/exclude_paths against the full URL (query string included) instead of just the path.",
+    )
+    restrict_to_start_path: bool = Field(
+        default=False,
+        description="Stay under start_url's own path (e.g. starting at /docs/ stays under /docs/) instead of crawling the whole domain.",
+    )
+    allow_subdomains: bool = Field(
+        default=False,
+        description="Treat any subdomain of the same site as in-scope, not just a leading www. alias.",
+    )
+    allow_external_links: bool = Field(
+        default=False,
+        description="Record a cross-site link as a discovered URL, fetched once, never expanded further.",
+    )
+    ignore_query_parameters: bool = Field(
+        default=False,
+        description="Drop every URL's query string entirely when deciding if two URLs are the same page.",
+    )
+    ignore_robots_txt: bool = Field(
+        default=False,
+        description="Crawl every same-site URL regardless of robots.txt. Off by default -- this crawler obeys robots.txt unless a caller explicitly opts out.",
+    )
+
+    _validate_paths = field_validator("include_paths", "exclude_paths")(_validate_path_patterns)
 
 
 class CrawlErrorDetail(BaseModel):

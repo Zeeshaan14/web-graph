@@ -41,6 +41,17 @@ SUCCESS_RESULT = {
     "shared_content_markdown": "",
 }
 
+DEFAULT_SCOPE_KWARGS = {
+    "include_paths": None,
+    "exclude_paths": None,
+    "regex_on_full_url": False,
+    "restrict_to_start_path": False,
+    "allow_subdomains": False,
+    "allow_external_links": False,
+    "ignore_query_parameters": False,
+    "ignore_robots_txt": False,
+}
+
 FAILED_RESULT = {
     "status": "failed",
     "start_url": "https://example.com/",
@@ -66,7 +77,9 @@ class TestDiscoverAndExtractRoute:
                 json={"url": "https://example.com/", "max_pages": 20, "max_depth": 2},
             )
 
-        mock_call.assert_called_once_with("https://example.com/", max_pages=20, max_depth=2)
+        mock_call.assert_called_once_with(
+            "https://example.com/", max_pages=20, max_depth=2, **DEFAULT_SCOPE_KWARGS
+        )
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "success"
@@ -79,7 +92,38 @@ class TestDiscoverAndExtractRoute:
         ) as mock_call:
             client.post("/discover-and-extract", json={"url": "https://example.com/"})
 
-        mock_call.assert_called_once_with("https://example.com/", max_pages=10, max_depth=None)
+        mock_call.assert_called_once_with(
+            "https://example.com/", max_pages=10, max_depth=None, **DEFAULT_SCOPE_KWARGS
+        )
+
+    def test_scope_options_are_forwarded(self):
+        with patch(
+            "api.routes.website_processing.discover_and_extract", return_value=SUCCESS_RESULT
+        ) as mock_call:
+            client.post(
+                "/discover-and-extract",
+                json={
+                    "url": "https://example.com/",
+                    "include_paths": ["^/blog/"],
+                    "allow_subdomains": True,
+                    "ignore_robots_txt": True,
+                },
+            )
+
+        kwargs = mock_call.call_args.kwargs
+        assert kwargs["include_paths"] == ["^/blog/"]
+        assert kwargs["allow_subdomains"] is True
+        assert kwargs["ignore_robots_txt"] is True
+
+    def test_invalid_regex_is_rejected_before_discover_and_extract_is_called(self):
+        with patch("api.routes.website_processing.discover_and_extract") as mock_call:
+            response = client.post(
+                "/discover-and-extract",
+                json={"url": "https://example.com/", "exclude_paths": ["(unclosed"]},
+            )
+
+        mock_call.assert_not_called()
+        assert response.status_code == 422
 
     def test_passes_through_a_failed_result_as_200_not_500(self):
         with patch("api.routes.website_processing.discover_and_extract", return_value=FAILED_RESULT):
@@ -147,7 +191,9 @@ class TestDiscoverAndExtractStreamRoute:
                 json={"url": "https://example.com/", "max_pages": 20, "max_depth": 2},
             )
 
-        mock_call.assert_called_once_with("https://example.com/", max_pages=20, max_depth=2)
+        mock_call.assert_called_once_with(
+            "https://example.com/", max_pages=20, max_depth=2, **DEFAULT_SCOPE_KWARGS
+        )
         assert response.status_code == 200
 
     def test_response_is_one_json_object_per_line_in_order(self):

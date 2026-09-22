@@ -26,5 +26,13 @@ def discover_urls_route(request: DiscoverRequest) -> DiscoverResponse:
         max_depth=request.max_depth,
         path_specific_strip=path_specific_strip,
         timeout_seconds=request.timeout_seconds,
+        include_paths=request.include_paths,
+        exclude_paths=request.exclude_paths,
+        regex_on_full_url=request.regex_on_full_url,
+        restrict_to_start_path=request.restrict_to_start_path,
+        allow_subdomains=request.allow_subdomains,
+        allow_external_links=request.allow_external_links,
+        ignore_query_parameters=request.ignore_query_parameters,
+        ignore_robots_txt=request.ignore_robots_txt,
     )
     return DiscoverResponse(**result)
