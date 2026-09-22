@@ -1116,3 +1116,245 @@ class TestBrowserFallback:
             crawl("https://example.com/", max_pages=10, max_depth=0)
 
         mock_sync_playwright.assert_not_called()
+
+
+class TestIncludeExcludePaths:
+    def test_exclude_paths_stops_a_link_from_ever_being_queued(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/blog/post">Post</a><a href="/legal/terms">Terms</a>',
+            ),
+            "https://example.com/blog/post": ("https://example.com/blog/post", "<html>post</html>"),
+        }
+        call_log = []
+        result = run(
+            pages, call_log,
+            start_url="https://example.com/", max_pages=10, max_depth=1,
+            exclude_paths=[r"^/legal/"],
+        )
+
+        assert "https://example.com/legal/terms" not in call_log
+        assert result["urls"] == ["https://example.com/", "https://example.com/blog/post"]
+
+    def test_include_paths_only_queues_matching_links(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/blog/post">Post</a><a href="/about">About</a>',
+            ),
+            "https://example.com/blog/post": ("https://example.com/blog/post", "<html>post</html>"),
+        }
+        call_log = []
+        result = run(
+            pages, call_log,
+            start_url="https://example.com/", max_pages=10, max_depth=1,
+            include_paths=[r"^/blog/"],
+        )
+
+        assert "https://example.com/about" not in call_log
+        assert result["urls"] == ["https://example.com/", "https://example.com/blog/post"]
+
+    def test_start_url_is_crawled_even_if_it_would_not_match_include_paths(self):
+        # The filter only ever gates DISCOVERED links -- the URL a caller
+        # explicitly asked to crawl is never subject to its own rules.
+        pages = {
+            "https://example.com/": ("https://example.com/", "<html>home</html>"),
+        }
+        result = run(
+            pages, start_url="https://example.com/", max_pages=10, max_depth=0,
+            include_paths=[r"^/blog/"],
+        )
+
+        assert result["urls"] == ["https://example.com/"]
+
+    def test_exclude_wins_when_a_link_matches_both_include_and_exclude(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/blog/draft">Draft</a>',
+            ),
+        }
+        call_log = []
+        result = run(
+            pages, call_log,
+            start_url="https://example.com/", max_pages=10, max_depth=1,
+            include_paths=[r"^/blog/"], exclude_paths=[r"draft"],
+        )
+
+        assert "https://example.com/blog/draft" not in call_log
+        assert result["urls"] == ["https://example.com/"]
+
+
+class TestRestrictToStartPath:
+    def test_restrict_to_start_path_stays_under_the_starting_directory(self):
+        pages = {
+            "https://example.com/docs/": (
+                "https://example.com/docs/",
+                '<a href="/docs/guide">Guide</a><a href="/pricing">Pricing</a>',
+            ),
+            "https://example.com/docs/guide": ("https://example.com/docs/guide", "<html>guide</html>"),
+        }
+        call_log = []
+        result = run(
+            pages, call_log,
+            start_url="https://example.com/docs/", max_pages=10, max_depth=1,
+            restrict_to_start_path=True,
+        )
+
+        assert "https://example.com/pricing" not in call_log
+        assert result["urls"] == ["https://example.com/docs/", "https://example.com/docs/guide"]
+
+    def test_off_by_default_crawls_the_whole_domain(self):
+        pages = {
+            "https://example.com/docs/": (
+                "https://example.com/docs/",
+                '<a href="/pricing">Pricing</a>',
+            ),
+            "https://example.com/pricing": ("https://example.com/pricing", "<html>pricing</html>"),
+        }
+        result = run(pages, start_url="https://example.com/docs/", max_pages=10, max_depth=1)
+
+        assert "https://example.com/pricing" in result["urls"]
+
+
+class TestAllowSubdomains:
+    def test_off_by_default_a_subdomain_link_is_dropped(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="https://blog.example.com/post">Post</a>',
+            ),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=1)
+
+        assert result["urls"] == ["https://example.com/"]
+
+    def test_allow_subdomains_true_follows_and_traverses_a_subdomain_link(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="https://blog.example.com/post">Post</a>',
+            ),
+            "https://blog.example.com/post": ("https://blog.example.com/post", "<html>post</html>"),
+        }
+        result = run(
+            pages, start_url="https://example.com/", max_pages=10, max_depth=1,
+            allow_subdomains=True,
+        )
+
+        assert result["urls"] == ["https://example.com/", "https://blog.example.com/post"]
+
+
+class TestAllowExternalLinks:
+    def test_off_by_default_an_external_link_is_never_recorded(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="https://other.com/page">Other</a>',
+            ),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=1)
+
+        assert result["urls"] == ["https://example.com/"]
+        assert result["pages_traversed"] == 1
+
+    def test_allow_external_links_records_it_but_never_expands_it(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="https://other.com/page">Other</a>',
+            ),
+            "https://other.com/page": (
+                "https://other.com/page",
+                '<a href="https://other.com/never-reached">Nope</a>',
+            ),
+        }
+        call_log = []
+        result = run(
+            pages, call_log,
+            start_url="https://example.com/", max_pages=10, max_depth=2,
+            allow_external_links=True,
+        )
+
+        assert result["urls"] == ["https://example.com/", "https://other.com/page"]
+        assert "https://other.com/never-reached" not in call_log
+
+    def test_allow_external_links_does_not_apply_start_domain_robots_txt_to_it(self):
+        # robots.txt was loaded for example.com -- it says nothing valid
+        # about other.com, so it must never be consulted for it, even
+        # though example.com's own robots.txt happens to disallow the
+        # exact path the external link uses.
+        pages = {
+            "https://example.com/robots.txt": (
+                "https://example.com/robots.txt",
+                "User-agent: *\nDisallow: /page\n",
+            ),
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="https://other.com/page">Other</a>',
+            ),
+            "https://other.com/page": ("https://other.com/page", "<html>other</html>"),
+        }
+        result = run(
+            pages, start_url="https://example.com/", max_pages=10, max_depth=1,
+            allow_external_links=True,
+        )
+
+        assert "https://other.com/page" in result["urls"]
+
+
+class TestIgnoreQueryParameters:
+    def test_two_links_differing_only_by_query_collapse_to_one_traversal(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/search?q=shoes">Shoes</a><a href="/search?q=boots">Boots</a>',
+            ),
+            "https://example.com/search": ("https://example.com/search", "<html>search</html>"),
+        }
+        call_log = []
+        result = run(
+            pages, call_log,
+            start_url="https://example.com/", max_pages=10, max_depth=1,
+            ignore_query_parameters=True,
+        )
+
+        assert call_log.count("https://example.com/search") == 1
+        assert result["urls"] == ["https://example.com/", "https://example.com/search"]
+
+
+class TestIgnoreRobotsTxt:
+    def test_off_by_default_a_disallowed_path_is_still_blocked(self):
+        pages = {
+            "https://example.com/robots.txt": (
+                "https://example.com/robots.txt",
+                "User-agent: *\nDisallow: /private/\n",
+            ),
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/private/">Private</a>',
+            ),
+        }
+        result = run(pages, start_url="https://example.com/", max_pages=10, max_depth=1)
+
+        assert "https://example.com/private/" not in result["urls"]
+
+    def test_ignore_robots_txt_true_crawls_a_disallowed_path_anyway(self):
+        pages = {
+            "https://example.com/robots.txt": (
+                "https://example.com/robots.txt",
+                "User-agent: *\nDisallow: /private/\n",
+            ),
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/private/">Private</a>',
+            ),
+            "https://example.com/private/": ("https://example.com/private/", "<html>private</html>"),
+        }
+        result = run(
+            pages, start_url="https://example.com/", max_pages=10, max_depth=1,
+            ignore_robots_txt=True,
+        )
+
+        assert "https://example.com/private/" in result["urls"]

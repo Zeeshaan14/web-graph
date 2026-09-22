@@ -12,6 +12,7 @@
 # (silent unless someone turns on verbose logging).
 
 import logging
+import re
 import time
 from collections import deque
 from urllib.parse import urlparse
@@ -72,6 +73,45 @@ def _friendly_fetch_error(url: str, exc: requests.RequestException) -> str:
     return str(exc)
 
 
+def _compile_path_patterns(patterns: list[str] | None) -> list[re.Pattern]:
+    return [re.compile(p) for p in patterns] if patterns else []
+
+
+def _in_scope(
+    url: str,
+    include_patterns: list[re.Pattern],
+    exclude_patterns: list[re.Pattern],
+    regex_on_full_url: bool,
+    start_path: str,
+    restrict_to_start_path: bool,
+) -> bool:
+    """Whether a candidate same-site URL (a sitemap entry or a link found
+    on a page) should be queued for traversal at all -- checked once,
+    before it ever reaches the queue, so an out-of-scope URL never costs
+    a wasted HTTP request. Never applied to the start URL itself, which
+    is always crawled regardless of these filters -- a caller who asked
+    to crawl a specific URL gets that URL, even if it wouldn't otherwise
+    match its own include/exclude/restrict rules.
+
+    Exclude wins over include when a URL matches both, same precedence
+    Firecrawl's own includePaths/excludePaths use. regex_on_full_url
+    matches against the whole URL (query string included) instead of
+    just the path -- off by default, since a path-only match is what a
+    caller most often means by "only crawl /blog/*"."""
+    target = url if regex_on_full_url else urlparse(url).path
+
+    if restrict_to_start_path and not urlparse(url).path.startswith(start_path):
+        return False
+
+    if exclude_patterns and any(pattern.search(target) for pattern in exclude_patterns):
+        return False
+
+    if include_patterns and not any(pattern.search(target) for pattern in include_patterns):
+        return False
+
+    return True
+
+
 def _load_robots_policy(session, scheme: str, domain: str) -> RobotFileParser:
     """Fetches and parses robots.txt for the site being crawled -- always
     on, not a caller-toggled option, same as the politeness pacing in
@@ -105,6 +145,8 @@ def _discover_sitemap_urls(
     domain: str,
     robots_policy: RobotFileParser,
     path_specific_strip: dict[str, set[str]] | None,
+    ignore_query_parameters: bool = False,
+    allow_subdomains: bool = False,
 ) -> list[str]:
     """Seeds extra same-site URLs from ONE sitemap -- the first one robots.txt
     declares via a `Sitemap:` line, or the conventional /sitemap.xml if it
@@ -135,8 +177,8 @@ def _discover_sitemap_urls(
         # (e.g. "{http://www.sitemaps.org/schemas/sitemap/0.9}loc"), and
         # ElementTree keeps that namespace as part of .tag.
         if element.tag.endswith("loc") and element.text:
-            clean_url = normalize_url(element.text.strip(), path_specific_strip)
-            if is_same_site(urlparse(clean_url).netloc, domain):
+            clean_url = normalize_url(element.text.strip(), path_specific_strip, ignore_query_parameters)
+            if is_same_site(urlparse(clean_url).netloc, domain, allow_subdomains):
                 urls.append(clean_url)
 
     return urls
@@ -148,6 +190,14 @@ def crawl_stream(
     max_depth: int | None = None,
     path_specific_strip: dict[str, set[str]] | None = None,
     timeout_seconds: float | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+    regex_on_full_url: bool = False,
+    restrict_to_start_path: bool = False,
+    allow_subdomains: bool = False,
+    allow_external_links: bool = False,
+    ignore_query_parameters: bool = False,
+    ignore_robots_txt: bool = False,
 ):
     """The traversal engine, as a generator of progress events -- crawl()
     below is just this, exhausted for its final event. Split out for the
@@ -176,6 +226,48 @@ def crawl_stream(
     long time on a slow site, since it says nothing about how long each
     page takes.
 
+    include_paths / exclude_paths: regex patterns (matched against a
+    candidate URL's path, or the full URL if regex_on_full_url=True) that
+    gate whether a discovered link or sitemap URL is queued for
+    traversal at all -- never applied to start_url itself, which is
+    always crawled. exclude wins when both match. Checked once, before a
+    URL ever reaches the queue, so an out-of-scope link never costs a
+    wasted HTTP request.
+
+    restrict_to_start_path: when True, only URLs whose path starts with
+    start_url's own path are queued -- e.g. starting a crawl at
+    "/docs/" stays under "/docs/" instead of the whole site. Off by
+    default (whole-domain crawl), matching this crawler's behavior
+    before this option existed.
+
+    allow_subdomains: widens same-site matching (see
+    link_extraction.is_same_site()) so blog.example.com,
+    docs.example.com, etc. all count as the current site instead of
+    just a leading "www." alias.
+
+    allow_external_links: when True, a link to a different site is still
+    recorded as a discovered URL, but as a leaf -- fetched once (to
+    confirm it resolves and follow any redirect), never parsed for its
+    own links or canonical tag, and never expanded further. Off by
+    default, matching this crawler's site-boundary behavior before this
+    option existed: an external link (or an internal page that redirects
+    externally) is simply dropped. Note: this crawl's own robots.txt
+    policy (loaded for start_url's domain) is never applied to an
+    external URL -- checking a *different* site's robots.txt would mean
+    fetching and caching a policy per external domain, out of scope for
+    what is deliberately a one-hop, unexpanded record.
+
+    ignore_query_parameters: when True, every URL's query string is
+    dropped entirely during normalization (traversal identity, output
+    identity, and link discovery all use the query-stripped form) --
+    for a caller who knows query params never distinguish a genuinely
+    different page on this site. See link_extraction.normalize_url().
+
+    ignore_robots_txt: when True, robots.txt is still fetched (its
+    sitemap declarations are still useful) but never enforced -- every
+    same-site URL is treated as allowed. Off by default: this crawler
+    obeys robots.txt unconditionally unless a caller explicitly opts out.
+
     The final event's result is internal traversal data, NOT the public
     API contract -- shaping it into a {status, start_url, discovered_urls,
     ...} response is discover_urls_stream()'s job, not this function's:
@@ -183,34 +275,45 @@ def crawl_stream(
     and keeps going -- it never decides what those failures mean for the
     crawl as a whole, and it never catches anything else. An unexpected
     exception here is meant to propagate out to discover_urls_stream()."""
-    start_url = normalize_url(start_url, path_specific_strip)
+    start_url = normalize_url(start_url, path_specific_strip, ignore_query_parameters)
     start_parsed = urlparse(start_url)
     start_domain = start_parsed.netloc
+    start_path = start_parsed.path or "/"
+
+    include_patterns = _compile_path_patterns(include_paths)
+    exclude_patterns = _compile_path_patterns(exclude_paths)
+
+    def in_scope(url: str) -> bool:
+        return _in_scope(url, include_patterns, exclude_patterns, regex_on_full_url, start_path, restrict_to_start_path)
 
     session = new_session()
 
     robots_policy = _load_robots_policy(session, start_parsed.scheme, start_domain)
     sitemap_urls = _discover_sitemap_urls(
-        session, start_parsed.scheme, start_domain, robots_policy, path_specific_strip
+        session, start_parsed.scheme, start_domain, robots_policy, path_specific_strip,
+        ignore_query_parameters, allow_subdomains,
     )
 
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
 
-    # Each queue entry carries its depth alongside the URL: start_url is
-    # depth 0, pages it links to are depth 1, pages those link to are
-    # depth 2, and so on. Sitemap-sourced URLs are seeded at depth 0 too --
-    # they're a direct hint from the site itself, not something reached by
-    # following a link, so they shouldn't be penalized as "deeper."
-    queue = deque([(start_url, 0)])
+    # Each queue entry carries its depth and whether it was reached via an
+    # external (cross-site) link alongside the URL: start_url is depth 0,
+    # not external; pages it links to are depth 1, pages those link to
+    # are depth 2, and so on. Sitemap-sourced URLs are seeded at depth 0
+    # too -- they're a direct hint from the site itself, not something
+    # reached by following a link, so they shouldn't be penalized as
+    # "deeper." Sitemap URLs are never external -- _discover_sitemap_urls()
+    # already filters to same-site only.
+    queue = deque([(start_url, 0, False)])
 
     # URLs already added to the queue.
     # Prevents the same URL being queued multiple times.
     seen = {start_url}
 
     for sitemap_url in sitemap_urls:
-        if sitemap_url not in seen:
+        if sitemap_url not in seen and in_scope(sitemap_url):
             seen.add(sitemap_url)
-            queue.append((sitemap_url, 0))
+            queue.append((sitemap_url, 0, False))
 
     # TRAVERSAL identity: which final destinations we've actually
     # fetched and expanded. /articles/ and /articles/page/2/ are
@@ -251,9 +354,16 @@ def crawl_stream(
                 logger.debug("Wall-clock timeout reached, stopping crawl (%.0fs budget)", timeout_seconds)
                 break
 
-            current_url, depth = queue.popleft()
+            current_url, depth, queued_as_external = queue.popleft()
 
-            if not robots_policy.can_fetch(ROBOTS_USER_AGENT, current_url):
+            # robots_policy was loaded for start_url's domain -- it has
+            # nothing valid to say about an external URL, so it's never
+            # consulted for one, regardless of ignore_robots_txt.
+            if (
+                not queued_as_external
+                and not ignore_robots_txt
+                and not robots_policy.can_fetch(ROBOTS_USER_AGENT, current_url)
+            ):
                 logger.debug("Disallowed by robots.txt: %s", current_url)
                 continue
 
@@ -275,19 +385,23 @@ def crawl_stream(
 
             # The server may have redirected us -- the final destination,
             # not the URL we requested, is this page's identity so far.
-            final_url = normalize_url(response.url, path_specific_strip)
+            final_url = normalize_url(response.url, path_specific_strip, ignore_query_parameters)
             final_domain = urlparse(final_url).netloc
 
             # Same-site checking happens twice: once when a link is
             # discovered (extract_links() below only returns links matching
-            # the CURRENT page's domain), and again here, because a redirect
-            # can move us outside the crawl boundary even when the URL we
-            # REQUESTED was legitimately in scope -- e.g.
+            # the CURRENT page's domain, unless allow_external_links widens
+            # that), and again here, because a redirect can move us outside
+            # the crawl boundary even when the URL we REQUESTED was
+            # legitimately in scope -- e.g.
             # realpython.com/merch -> realpython.threadless.com. The
             # requested URL is already in `seen` (it got there before being
-            # queued), so it won't be retried -- but the external
-            # destination itself is never recorded or expanded.
-            if not is_same_site(final_domain, start_domain):
+            # queued), so it won't be retried.
+            page_is_external = not is_same_site(final_domain, start_domain, allow_subdomains)
+
+            if page_is_external and not allow_external_links:
+                # Default behavior, unchanged: the external destination is
+                # never recorded or expanded.
                 logger.debug("External redirect, stopping: %s -> %s", current_url, final_url)
                 continue
 
@@ -310,6 +424,19 @@ def crawl_stream(
             # rather than re-queued and re-fetched as if it were new.
             seen.add(current_url)
             seen.add(final_url)
+
+            if page_is_external:
+                # allow_external_links=True and we got here: record it as a
+                # discovered URL, but as a leaf -- never parsed for its own
+                # canonical tag or links, never expanded. One HTTP request
+                # (the one that just ran) is the full cost of an external
+                # URL, same as Firecrawl's "scraped once without further
+                # link discovery."
+                if final_url not in output_seen:
+                    output_seen.add(final_url)
+                    discovered_output.append(final_url)
+                    yield {"event": "url_discovered", "url": final_url, "count": len(discovered_output)}
+                continue
 
             # A non-HTML response (PDF, image, ...) has no canonical tag and
             # no <a> links to extract -- feeding it to the HTML parser would
@@ -370,12 +497,12 @@ def crawl_stream(
             canonical_url = extract_canonical(page_html, response.url) if is_html_page else None
 
             if canonical_url:
-                canonical_url = normalize_url(canonical_url, path_specific_strip)
+                canonical_url = normalize_url(canonical_url, path_specific_strip, ignore_query_parameters)
                 canonical_domain = urlparse(canonical_url).netloc
 
                 logger.debug("Canonical: %s -> %s", final_url, canonical_url)
 
-                if is_same_site(canonical_domain, start_domain):
+                if is_same_site(canonical_domain, start_domain, allow_subdomains):
                     output_url = canonical_url
 
             if output_url not in output_seen:
@@ -397,18 +524,33 @@ def crawl_stream(
             # and /articles/page/2/ share an output URL but do NOT share
             # content. Gating this on output_seen would silently stop the
             # crawl from ever reaching /articles/page/3/ and beyond.
-            links = extract_links(
+            same_site_links, external_links = extract_links(
                 page_html,
                 response.url,
                 path_specific_strip,
+                ignore_query_parameters,
+                allow_subdomains,
+                allow_external_links,
             )
 
-            for link in links:
+            for link in same_site_links:
+                if link in seen:
+                    continue
+                if not in_scope(link):
+                    continue
+
+                seen.add(link)
+                queue.append((link, depth + 1, False))
+
+            for link in external_links:
+                # include/exclude/restrict_to_start_path describe THIS
+                # site's own path structure -- they say nothing about a
+                # different domain's paths, so they're never applied here.
                 if link in seen:
                     continue
 
                 seen.add(link)
-                queue.append((link, depth + 1))
+                queue.append((link, depth + 1, True))
     finally:
         if browser is not None:
             browser.close()
@@ -431,16 +573,32 @@ def crawl(
     max_depth: int | None = None,
     path_specific_strip: dict[str, set[str]] | None = None,
     timeout_seconds: float | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+    regex_on_full_url: bool = False,
+    restrict_to_start_path: bool = False,
+    allow_subdomains: bool = False,
+    allow_external_links: bool = False,
+    ignore_query_parameters: bool = False,
+    ignore_robots_txt: bool = False,
 ) -> dict:
     """Non-streaming convenience wrapper, same contract this had before
     streaming existed -- exhausts crawl_stream() and returns just its
-    final result."""
+    final result. See crawl_stream() for what each parameter does."""
     for event in crawl_stream(
         start_url,
         max_pages=max_pages,
         max_depth=max_depth,
         path_specific_strip=path_specific_strip,
         timeout_seconds=timeout_seconds,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        regex_on_full_url=regex_on_full_url,
+        restrict_to_start_path=restrict_to_start_path,
+        allow_subdomains=allow_subdomains,
+        allow_external_links=allow_external_links,
+        ignore_query_parameters=ignore_query_parameters,
+        ignore_robots_txt=ignore_robots_txt,
     ):
         if event["event"] == "complete":
             return event["result"]
@@ -452,6 +610,14 @@ def discover_urls_stream(
     max_depth: int | None = None,
     path_specific_strip: dict[str, set[str]] | None = None,
     timeout_seconds: float | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+    regex_on_full_url: bool = False,
+    restrict_to_start_path: bool = False,
+    allow_subdomains: bool = False,
+    allow_external_links: bool = False,
+    ignore_query_parameters: bool = False,
+    ignore_robots_txt: bool = False,
 ):
     """The feature-level streaming entry point -- crawl_stream() is the
     traversal engine; this is the contract + safety boundary around it,
@@ -465,7 +631,8 @@ def discover_urls_stream(
     Passes every "url_discovered" event through unchanged, then yields
     its OWN "complete" event carrying the full public contract --
     {status, start_url, discovered_urls, pages_traversed, errors} -- the
-    same shape discover_urls() has always returned.
+    same shape discover_urls() has always returned. See crawl_stream()
+    for what each parameter does.
 
     crawl_stream() itself only ever records expected per-page failures
     (RequestException) and keeps going. Anything else escaping it -- a
@@ -479,6 +646,14 @@ def discover_urls_stream(
             max_depth=max_depth,
             path_specific_strip=path_specific_strip,
             timeout_seconds=timeout_seconds,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+            regex_on_full_url=regex_on_full_url,
+            restrict_to_start_path=restrict_to_start_path,
+            allow_subdomains=allow_subdomains,
+            allow_external_links=allow_external_links,
+            ignore_query_parameters=ignore_query_parameters,
+            ignore_robots_txt=ignore_robots_txt,
         ):
             if event["event"] == "url_discovered":
                 yield event
@@ -526,16 +701,32 @@ def discover_urls(
     max_depth: int | None = None,
     path_specific_strip: dict[str, set[str]] | None = None,
     timeout_seconds: float | None = None,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
+    regex_on_full_url: bool = False,
+    restrict_to_start_path: bool = False,
+    allow_subdomains: bool = False,
+    allow_external_links: bool = False,
+    ignore_query_parameters: bool = False,
+    ignore_robots_txt: bool = False,
 ) -> dict:
     """Non-streaming convenience wrapper, same contract this had before
     streaming existed -- exhausts discover_urls_stream() and returns just
-    its final result."""
+    its final result. See crawl_stream() for what each parameter does."""
     for event in discover_urls_stream(
         start_url,
         max_pages=max_pages,
         max_depth=max_depth,
         path_specific_strip=path_specific_strip,
         timeout_seconds=timeout_seconds,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        regex_on_full_url=regex_on_full_url,
+        restrict_to_start_path=restrict_to_start_path,
+        allow_subdomains=allow_subdomains,
+        allow_external_links=allow_external_links,
+        ignore_query_parameters=ignore_query_parameters,
+        ignore_robots_txt=ignore_robots_txt,
     ):
         if event["event"] == "complete":
             return event["result"]
