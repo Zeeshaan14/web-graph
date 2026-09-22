@@ -22,6 +22,7 @@ import { PageHero } from "@/components/page-hero";
 import { ResultSkeleton } from "@/components/result-skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { ApiError, discoverUrls, type DiscoverResponse } from "@/lib/api";
+import { normalizeUrlInput } from "@/lib/url";
 
 function UrlDiscoveryForm({
   url,
@@ -54,8 +55,9 @@ function UrlDiscoveryForm({
           </Label>
           <Input
             id="disc-url"
-            type="url"
-            placeholder="https://example.com"
+            type="text"
+            inputMode="url"
+            placeholder="lakshx.in or https://example.com"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             className="h-10 border-0 bg-transparent shadow-none focus-visible:ring-0"
@@ -117,7 +119,7 @@ function UrlDiscoveryPageInner() {
     setResult(null);
     try {
       const response = await discoverUrls(
-        targetUrl.trim(),
+        normalizeUrlInput(targetUrl),
         Number(maxPages) || 10,
         maxDepth.trim() === "" ? null : Number(maxDepth)
       );

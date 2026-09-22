@@ -25,6 +25,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApiError, extractContent, type ExtractResponse } from "@/lib/api";
 import { downloadMarkdown, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
+import { normalizeUrlInput } from "@/lib/url";
 
 function wordCount(markdown: string): number {
   const trimmed = markdown.trim();
@@ -53,8 +54,9 @@ function ContentExtractionForm({
         </Label>
         <Input
           id="extract-url"
-          type="url"
-          placeholder="https://example.com/some-article"
+          type="text"
+          inputMode="url"
+          placeholder="lakshx.in/some-article or https://example.com"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           className="h-10 border-0 bg-transparent shadow-none focus-visible:ring-0"
@@ -81,7 +83,7 @@ function ContentExtractionPageInner() {
     setLoading(true);
     setResult(null);
     try {
-      const response = await extractContent(targetUrl.trim());
+      const response = await extractContent(normalizeUrlInput(targetUrl));
       setResult(response);
     } catch (error) {
       toast.error(error instanceof ApiError ? error.message : "Something went wrong.");

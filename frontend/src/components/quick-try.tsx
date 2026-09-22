@@ -6,6 +6,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { normalizeUrlInput } from "@/lib/url";
 import { cn } from "@/lib/utils";
 
 const TOOLS: { href: string; label: string; icon: LucideIcon }[] = [
@@ -23,7 +24,7 @@ export function QuickTry() {
   function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (!url.trim()) return;
-    router.push(`${tool}?url=${encodeURIComponent(url.trim())}&run=1`);
+    router.push(`${tool}?url=${encodeURIComponent(normalizeUrlInput(url))}&run=1`);
   }
 
   return (
@@ -38,7 +39,8 @@ export function QuickTry() {
         <Input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          type="url"
+          type="text"
+          inputMode="url"
           placeholder="example.com"
           className="h-11 flex-1 border-0 bg-transparent font-mono text-sm shadow-none focus-visible:ring-0"
           required

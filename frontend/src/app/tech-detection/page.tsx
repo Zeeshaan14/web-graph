@@ -34,6 +34,7 @@ import {
   type DirectTechnology,
   type InferredTechnology,
 } from "@/lib/api";
+import { normalizeUrlInput } from "@/lib/url";
 
 function TechDetectionForm({
   url,
@@ -57,8 +58,9 @@ function TechDetectionForm({
         </Label>
         <Input
           id="tech-url"
-          type="url"
-          placeholder="https://example.com"
+          type="text"
+          inputMode="url"
+          placeholder="lakshx.in or https://example.com"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           className="h-10 border-0 bg-transparent shadow-none focus-visible:ring-0"
@@ -85,7 +87,7 @@ function TechDetectionPageInner() {
     setLoading(true);
     setResult(null);
     try {
-      const response = await detectTech(targetUrl.trim());
+      const response = await detectTech(normalizeUrlInput(targetUrl));
       setResult(response);
     } catch (error) {
       toast.error(error instanceof ApiError ? error.message : "Something went wrong.");

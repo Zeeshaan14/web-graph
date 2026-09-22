@@ -36,6 +36,7 @@ import {
   type ExtractResponse,
 } from "@/lib/api";
 import { downloadBlob, extractResponseToMarkdown, slugifyUrl } from "@/lib/markdown";
+import { normalizeUrlInput } from "@/lib/url";
 
 // A page starts as a bare placeholder (we only know its URL, from the
 // discovery_done event) and "graduates" into the full ExtractResponse
@@ -74,8 +75,9 @@ function DiscoverAndExtractForm({
           </Label>
           <Input
             id="combo-url"
-            type="url"
-            placeholder="https://example.com"
+            type="text"
+            inputMode="url"
+            placeholder="lakshx.in or https://example.com"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             className="h-10 border-0 bg-transparent shadow-none focus-visible:ring-0"
@@ -155,7 +157,7 @@ function DiscoverAndExtractPageInner() {
 
     try {
       await discoverAndExtractStream(
-        targetUrl.trim(),
+        normalizeUrlInput(targetUrl),
         Number(maxPages) || 10,
         maxDepth.trim() === "" ? null : Number(maxDepth),
         (event) => {
