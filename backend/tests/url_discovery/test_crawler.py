@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from url_discovery.crawler import crawl, discover_urls
+from url_discovery.crawler import crawl, crawl_stream, discover_urls, discover_urls_stream
 from tests.url_discovery.helpers import make_fake_get, make_not_found_response
 
 SHOULD_RENDER_TARGET = "url_discovery.crawler.should_render_with_browser"
@@ -562,10 +562,10 @@ class TestDiscoverUrls:
         assert result["pages_traversed"] == 2
 
     def test_unexpected_exception_inside_crawl_is_caught_as_failed(self):
-        # A bug/unexpected exception INSIDE crawl() (not a per-page
+        # A bug/unexpected exception INSIDE crawl_stream() (not a per-page
         # RequestException) must never escape discover_urls() as a raw
         # Python exception -- same lesson as tech_detection's pipeline.py.
-        with patch("url_discovery.crawler.crawl", side_effect=RuntimeError("unexpected bug")):
+        with patch("url_discovery.crawler.crawl_stream", side_effect=RuntimeError("unexpected bug")):
             result = discover_urls("https://example.com/", max_pages=10, max_depth=1)
 
         assert result == {
@@ -590,6 +590,99 @@ class TestDiscoverUrls:
             result = discover_urls("https://example.com/?utm_source=test", max_pages=10, max_depth=0)
 
         assert result["start_url"] == "https://example.com/?utm_source=test"
+
+
+class TestStreamingEvents:
+    """crawl()/discover_urls() (tested everywhere above) are just
+    crawl_stream()/discover_urls_stream() exhausted for their final
+    "complete" event -- these tests are about the events themselves."""
+
+    def test_crawl_stream_yields_one_url_discovered_event_per_page_in_order(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/a/">A</a><a href="/b/">B</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+            "https://example.com/b/": ("https://example.com/b/", "<html>b</html>"),
+        }
+        fake_get = make_fake_get(pages)
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            events = list(crawl_stream("https://example.com/", max_pages=10, max_depth=1))
+
+        discovered = [e for e in events if e["event"] == "url_discovered"]
+        assert [e["url"] for e in discovered] == [
+            "https://example.com/",
+            "https://example.com/a/",
+            "https://example.com/b/",
+        ]
+        assert [e["count"] for e in discovered] == [1, 2, 3]
+
+        assert events[-1]["event"] == "complete"
+        assert events[-1]["result"]["urls"] == [e["url"] for e in discovered]
+
+    def test_crawl_stream_final_event_matches_crawl_return_value(self):
+        pages = {
+            "https://example.com/": ("https://example.com/", '<a href="/a/">A</a>'),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+        }
+        fake_get = make_fake_get(pages)
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            events = list(crawl_stream("https://example.com/", max_pages=10, max_depth=1))
+            direct_result = crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        assert events[-1]["result"] == direct_result
+
+    def test_discover_urls_stream_passes_url_discovered_events_through(self):
+        pages = {
+            "https://example.com/": ("https://example.com/", '<a href="/a/">A</a>'),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+        }
+        fake_get = make_fake_get(pages)
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            events = list(discover_urls_stream("https://example.com/", max_pages=10, max_depth=1))
+
+        assert [e["event"] for e in events] == ["url_discovered", "url_discovered", "complete"]
+
+    def test_discover_urls_stream_complete_event_matches_discover_urls_return_value(self):
+        pages = {
+            "https://example.com/": ("https://example.com/", '<a href="/a/">A</a>'),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+        }
+        fake_get = make_fake_get(pages)
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            events = list(discover_urls_stream("https://example.com/", max_pages=10, max_depth=1))
+            direct_result = discover_urls("https://example.com/", max_pages=10, max_depth=1)
+
+        assert events[-1]["result"] == direct_result
+
+    def test_discover_urls_stream_failure_still_goes_straight_to_a_failed_complete_event(self):
+        def fake_get(url, timeout=10):
+            raise requests.ConnectionError("Connection timed out")
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            events = list(discover_urls_stream("https://example.com/", max_pages=10, max_depth=1))
+
+        assert [e["event"] for e in events] == ["complete"]
+        assert events[0]["result"]["status"] == "failed"
+
+    def test_unexpected_exception_mid_crawl_is_still_caught_as_a_failed_complete_event(self):
+        with patch("url_discovery.crawler.crawl_stream", side_effect=RuntimeError("unexpected bug")):
+            events = list(discover_urls_stream("https://example.com/", max_pages=10, max_depth=1))
+
+        assert [e["event"] for e in events] == ["complete"]
+        assert events[0]["result"] == {
+            "status": "failed",
+            "start_url": "https://example.com/",
+            "discovered_urls": [],
+            "pages_traversed": 0,
+            "errors": [{"url": "https://example.com/", "error": "unexpected bug"}],
+        }
 
 
 class TestRobotsTxt:

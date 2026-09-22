@@ -163,10 +163,18 @@ function DiscoverAndExtractPageInner() {
             case "discovery_started":
               setPhaseLabel("Discovering pages...");
               break;
+            case "url_discovered":
+              // Pages appear one by one as the crawl actually finds them,
+              // not all at once when discovery_done finally fires --
+              // that event still arrives later with the authoritative
+              // discovery summary, but there's no reason to make the user
+              // wait for it just to see the first page show up.
+              setPages((prev) => [...prev, { url: event.url, phase: "pending" }]);
+              setPhaseLabel(`Discovered ${event.count} page${event.count === 1 ? "" : "s"} so far...`);
+              break;
             case "discovery_done":
               setDiscovery(event.discovery);
               total = event.discovery.discovered_urls.length;
-              setPages(event.discovery.discovered_urls.map((pageUrl) => ({ url: pageUrl, phase: "pending" })));
               setPhaseLabel(total > 0 ? `Fetching 0/${total} pages...` : "No pages to extract.");
               break;
             case "page_fetched":
@@ -269,13 +277,17 @@ function DiscoverAndExtractPageInner() {
       </PageHero>
 
       <div className="flex flex-col gap-6 py-8">
-        {loading && !discovery && (
+        {loading && !discovery && pages.length === 0 && (
           // A live status card, not a generic skeleton -- discovery (the
           // crawl itself) commonly takes several seconds with no
           // sub-progress of its own to report, and a static skeleton gives
           // no sign the stream connection is even open during that whole
           // window. This shows the real phase text from the moment the
           // request starts, so the wait reads as "in progress," not frozen.
+          // Only shown before the very first page is found -- once
+          // url_discovered events start arriving, the main results
+          // section below (gated on discovery || pages.length > 0) takes
+          // over and shows the same live phase text plus real pages.
           <Card className="animate-in fade-in duration-300">
             <CardHeader>
               <CardTitle className="flex flex-wrap items-center gap-2">
@@ -293,7 +305,7 @@ function DiscoverAndExtractPageInner() {
           </Card>
         )}
 
-        {!loading && !discovery && !finalResult && (
+        {!loading && !discovery && !finalResult && pages.length === 0 && (
           <EmptyState
             icon={Workflow}
             title="No run yet"
@@ -301,12 +313,13 @@ function DiscoverAndExtractPageInner() {
           />
         )}
 
-        {discovery && (
+        {(discovery || pages.length > 0) && (
           <div className="flex animate-in fade-in flex-col gap-6 duration-300">
             <Card>
               <CardHeader>
                 <CardTitle className="flex flex-wrap items-center gap-2">
-                  Result for <span className="font-mono text-sm font-normal">{discovery.start_url}</span>
+                  Result for{" "}
+                  <span className="font-mono text-sm font-normal">{discovery?.start_url ?? url}</span>
                 </CardTitle>
                 <CardDescription>
                   <div className="flex flex-wrap items-center gap-2 pt-2">
@@ -318,8 +331,10 @@ function DiscoverAndExtractPageInner() {
                         {phaseLabel}
                       </Badge>
                     )}
-                    <Badge variant="outline">discovery: {discovery.status}</Badge>
-                    <Badge variant="outline">{discovery.pages_traversed} pages traversed</Badge>
+                    {discovery && <Badge variant="outline">discovery: {discovery.status}</Badge>}
+                    {discovery && (
+                      <Badge variant="outline">{discovery.pages_traversed} pages traversed</Badge>
+                    )}
                     {pages.length > 0 && (
                       <Badge variant="outline">
                         {succeeded}/{pages.length} extracted successfully
@@ -338,7 +353,7 @@ function DiscoverAndExtractPageInner() {
                   </div>
                 </CardContent>
               )}
-              {discovery.errors.length > 0 && (
+              {discovery && discovery.errors.length > 0 && (
                 <CardContent className="flex flex-col gap-2">
                   {discovery.errors.map((err, i) => (
                     <Alert variant="destructive" key={i}>

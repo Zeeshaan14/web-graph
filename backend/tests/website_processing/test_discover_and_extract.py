@@ -19,7 +19,7 @@ from website_processing.pipeline import (
     discover_and_extract_stream,
 )
 
-DISCOVER_TARGET = "website_processing.pipeline.discover_urls"
+DISCOVER_TARGET = "website_processing.pipeline.discover_urls_stream"
 EXTRACT_TARGET = "website_processing.pipeline.fetch_and_prepare"
 
 
@@ -31,6 +31,15 @@ def discovery(status, urls, errors=None):
         "pages_traversed": len(urls),
         "errors": errors or [],
     }
+
+
+def stream_of(result):
+    """discover_urls_stream() is a generator ending in a "complete" event
+    carrying its final result -- this is the minimal replay a mocked call
+    needs (no intermediate "url_discovered" events) for tests that only
+    care about the final discovery result, which is everything below
+    except TestUrlDiscoveredEvents."""
+    return iter([{"event": "complete", "result": result}])
 
 
 def make_body(inner_html: str) -> BeautifulSoup:
@@ -49,7 +58,7 @@ def page(status, url="https://example.com/p", error=None, body_html="<p>P</p>"):
 
 
 def run(discovery_result, page_results, **kwargs):
-    with patch(DISCOVER_TARGET, return_value=discovery_result), \
+    with patch(DISCOVER_TARGET, return_value=stream_of(discovery_result)), \
          patch(EXTRACT_TARGET, side_effect=page_results) as mock_extract:
         result = discover_and_extract("https://example.com/", **kwargs)
     return result, mock_extract
@@ -59,7 +68,7 @@ class TestDiscoveryFailedShortCircuit:
     def test_discovery_failed_returns_failed_without_calling_extract_content(self):
         disc = discovery("failed", [], errors=[{"url": "https://example.com/", "error": "timeout"}])
 
-        with patch(DISCOVER_TARGET, return_value=disc), patch(EXTRACT_TARGET) as mock_extract:
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), patch(EXTRACT_TARGET) as mock_extract:
             result = discover_and_extract("https://example.com/")
 
         mock_extract.assert_not_called()
@@ -120,7 +129,7 @@ class TestOrchestration:
         # What IS guaranteed, and what matters, is that each URL is
         # extracted exactly once; output ORDER is covered separately below.
         disc = discovery("success", ["https://example.com/a", "https://example.com/b"])
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=lambda url: page("success", url=url)) as mock_extract:
             discover_and_extract("https://example.com/")
 
@@ -130,7 +139,7 @@ class TestOrchestration:
 
     def test_discover_urls_receives_max_pages_and_max_depth(self):
         disc = discovery("success", ["a"])
-        with patch(DISCOVER_TARGET, return_value=disc) as mock_discover, \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)) as mock_discover, \
              patch(EXTRACT_TARGET, return_value=page("success")):
             discover_and_extract("https://example.com/", max_pages=25, max_depth=3)
 
@@ -156,7 +165,7 @@ class TestOrchestration:
             "b": page("failed", url="https://example.com/b", error="404"),
         }
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=lambda url: results_by_url[url]):
             result = discover_and_extract("https://example.com/")
 
@@ -199,7 +208,7 @@ class TestSharedContentWiring:
             page("success", url="https://example.com/c", body_html=f"{self.NAV}<p>Page C body.</p>"),
         ]
 
-        with patch(DISCOVER_TARGET, return_value=disc), patch(EXTRACT_TARGET, side_effect=pages):
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), patch(EXTRACT_TARGET, side_effect=pages):
             result = discover_and_extract("https://example.com/")
 
         for extracted_page, label in zip(result["pages"], ["A", "B", "C"]):
@@ -216,7 +225,7 @@ class TestSharedContentWiring:
             page("success", url="https://example.com/b", body_html="<p>Nothing nav-like here.</p>"),
         ]
 
-        with patch(DISCOVER_TARGET, return_value=disc), patch(EXTRACT_TARGET, side_effect=pages):
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), patch(EXTRACT_TARGET, side_effect=pages):
             result = discover_and_extract("https://example.com/")
 
         assert "[X]" in result["pages"][0]["content_markdown"]
@@ -224,7 +233,7 @@ class TestSharedContentWiring:
 
     def test_a_single_successful_page_never_triggers_dedup(self):
         disc = discovery("success", ["a"])
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, return_value=page("success", body_html=self.NAV)):
             result = discover_and_extract("https://example.com/")
 
@@ -241,7 +250,7 @@ class TestParallelExtraction:
             time.sleep(0.2)
             return page("success", url=url)
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=slow_extract):
             started = time.monotonic()
             discover_and_extract("https://example.com/")
@@ -272,7 +281,7 @@ class TestParallelExtraction:
                 in_flight -= 1
             return page("success", url=url)
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=tracking_extract):
             discover_and_extract("https://example.com/")
 
@@ -300,7 +309,7 @@ class TestParallelExtraction:
                 in_flight -= 1
             return page("success", url=url)
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=tracking_extract):
             discover_and_extract("https://example.com/")
 
@@ -326,18 +335,25 @@ class TestStreamingEvents:
 
     def test_event_sequence_for_a_successful_two_page_crawl(self):
         disc = discovery("success", ["a", "b"])
+        discovery_stream_events = iter([
+            {"event": "url_discovered", "url": "a", "count": 1},
+            {"event": "url_discovered", "url": "b", "count": 2},
+            {"event": "complete", "result": disc},
+        ])
         pages = {
             "a": page("success", url="a", body_html="<p>A</p>"),
             "b": page("success", url="b", body_html="<p>B</p>"),
         }
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=discovery_stream_events), \
              patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
             events = list(discover_and_extract_stream("https://example.com/"))
 
         event_names = [e["event"] for e in events]
         assert event_names == [
             "discovery_started",
+            "url_discovered",
+            "url_discovered",
             "discovery_done",
             "page_fetched",
             "page_fetched",
@@ -347,9 +363,31 @@ class TestStreamingEvents:
             "complete",
         ]
 
+    def test_url_discovered_events_pass_through_unchanged(self):
+        disc = discovery("success", ["a", "b"])
+        discovery_stream_events = iter([
+            {"event": "url_discovered", "url": "a", "count": 1},
+            {"event": "url_discovered", "url": "b", "count": 2},
+            {"event": "complete", "result": disc},
+        ])
+        pages = {
+            "a": page("success", url="a"),
+            "b": page("success", url="b"),
+        }
+
+        with patch(DISCOVER_TARGET, return_value=discovery_stream_events), \
+             patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
+            events = list(discover_and_extract_stream("https://example.com/"))
+
+        discovered = [e for e in events if e["event"] == "url_discovered"]
+        assert discovered == [
+            {"event": "url_discovered", "url": "a", "count": 1},
+            {"event": "url_discovered", "url": "b", "count": 2},
+        ]
+
     def test_discovery_done_carries_the_discovery_result(self):
         disc = discovery("success", ["a"])
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, return_value=page("success", url="a")):
             events = list(discover_and_extract_stream("https://example.com/"))
 
@@ -363,7 +401,7 @@ class TestStreamingEvents:
             "b": page("failed", url="b", error="404"),
         }
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
             events = list(discover_and_extract_stream("https://example.com/"))
 
@@ -379,7 +417,7 @@ class TestStreamingEvents:
             "c": page("success", url="c", body_html=f"{nav}<p>C body.</p>"),
         }
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
             events = list(discover_and_extract_stream("https://example.com/"))
 
@@ -403,11 +441,11 @@ class TestStreamingEvents:
             "b": page("failed", url="b", error="timeout"),
         }
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
             events = list(discover_and_extract_stream("https://example.com/"))
 
-        with patch(DISCOVER_TARGET, return_value=disc), \
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), \
              patch(EXTRACT_TARGET, side_effect=lambda url: pages[url]):
             direct_result = discover_and_extract("https://example.com/")
 
@@ -417,7 +455,7 @@ class TestStreamingEvents:
     def test_discovery_failure_short_circuits_straight_to_complete(self):
         disc = discovery("failed", [], errors=[{"url": "https://example.com/", "error": "timeout"}])
 
-        with patch(DISCOVER_TARGET, return_value=disc), patch(EXTRACT_TARGET) as mock_extract:
+        with patch(DISCOVER_TARGET, return_value=stream_of(disc)), patch(EXTRACT_TARGET) as mock_extract:
             events = list(discover_and_extract_stream("https://example.com/"))
 
         mock_extract.assert_not_called()

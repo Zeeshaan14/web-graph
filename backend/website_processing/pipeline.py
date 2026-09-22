@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from url_discovery.crawler import discover_urls
+from url_discovery.crawler import discover_urls_stream
 from content_extraction.content_extraction import fetch_and_prepare, render_markdown
 from website_processing.shared_content import find_shared_containers, remove_shared_containers, signature
 
@@ -39,6 +39,10 @@ def discover_and_extract_stream(
 
     Every event is {"event": <name>, ...}. In order:
       discovery_started
+      url_discovered   {url, count}   -- one per URL, as discover_urls_stream()
+                                          actually finds it during the BFS
+                                          crawl, not all at once when the
+                                          whole crawl finishes
       discovery_done   {discovery}
       page_fetched     {url, status}  -- one per page, as fetch_and_prepare()
                                           actually completes (real concurrent
@@ -53,11 +57,16 @@ def discover_and_extract_stream(
     """
     yield {"event": "discovery_started"}
 
-    discovery_result = discover_urls(
+    discovery_result = None
+    for event in discover_urls_stream(
         start_url=start_url,
         max_pages=max_pages,
         max_depth=max_depth,
-    )
+    ):
+        if event["event"] == "url_discovered":
+            yield event
+        else:
+            discovery_result = event["result"]
 
     yield {"event": "discovery_done", "discovery": discovery_result}
 

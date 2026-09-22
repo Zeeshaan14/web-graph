@@ -90,6 +90,7 @@ export interface DiscoverAndExtractResponse {
 // Server-Sent-Events framing.
 export type DiscoverAndExtractStreamEvent =
   | { event: "discovery_started" }
+  | { event: "url_discovered"; url: string; count: number }
   | { event: "discovery_done"; discovery: DiscoverResponse }
   | { event: "page_fetched"; url: string; status: "success" | "failed" }
   | { event: "dedup_done"; shared_content_markdown: string }

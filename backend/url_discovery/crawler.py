@@ -112,18 +112,32 @@ def _discover_sitemap_urls(
     return urls
 
 
-def crawl(
+def crawl_stream(
     start_url: str,
     max_pages: int | None = 10,
     max_depth: int | None = None,
     path_specific_strip: dict[str, set[str]] | None = None,
     timeout_seconds: float | None = None,
-) -> dict:
-    """path_specific_strip: optional site-specific noisy query params to
+):
+    """The traversal engine, as a generator of progress events -- crawl()
+    below is just this, exhausted for its final event. Split out for the
+    same reason content_extraction/website_processing's streaming pieces
+    were: a caller waiting on the WHOLE crawl before hearing about even
+    the first discovered URL has no way to show real progress, and a BFS
+    crawl of a real site commonly takes several seconds with nothing to
+    report until it's entirely done.
+
+    Yields {"event": "url_discovered", "url": str, "count": int} once per
+    URL as it's added to the crawl's output (same moment crawl()'s old
+    discovered_output.append() ran), then finally
+    {"event": "complete", "result": {"urls": [...], "pages_traversed": N,
+    "errors": [...]}} -- the exact dict crawl() has always returned.
+
+    path_specific_strip: optional site-specific noisy query params to
     strip, e.g. {"/feedback/realpython-com/": {"d"}}. See
     link_extraction.normalize_url() -- kept as an explicit argument here
-    rather than hardcoded, since crawl() is meant to work for any site,
-    not just the one quirk we've seen so far.
+    rather than hardcoded, since this is meant to work for any site, not
+    just the one quirk we've seen so far.
 
     timeout_seconds: an optional wall-clock budget for the whole crawl,
     checked the same way max_pages is -- before starting the next page,
@@ -132,14 +146,13 @@ def crawl(
     long time on a slow site, since it says nothing about how long each
     page takes.
 
-    Returns internal traversal data, NOT the public API contract --
-    {"urls": [...], "pages_traversed": N, "errors": [...]}. Shaping this
-    into a {status, start_url, discovered_urls, ...} response is
-    discover_urls()'s job, not this function's: crawl() only ever
-    records EXPECTED per-page failures (a RequestException) and keeps
-    going -- it never decides what those failures mean for the crawl as
-    a whole, and it never catches anything else. An unexpected exception
-    here is meant to propagate out to discover_urls()."""
+    The final event's result is internal traversal data, NOT the public
+    API contract -- shaping it into a {status, start_url, discovered_urls,
+    ...} response is discover_urls_stream()'s job, not this function's:
+    this only ever records EXPECTED per-page failures (a RequestException)
+    and keeps going -- it never decides what those failures mean for the
+    crawl as a whole, and it never catches anything else. An unexpected
+    exception here is meant to propagate out to discover_urls_stream()."""
     start_url = normalize_url(start_url, path_specific_strip)
     start_parsed = urlparse(start_url)
     start_domain = start_parsed.netloc
@@ -338,6 +351,7 @@ def crawl(
             if output_url not in output_seen:
                 output_seen.add(output_url)
                 discovered_output.append(output_url)
+                yield {"event": "url_discovered", "url": output_url, "count": len(discovered_output)}
 
             # Links found on this page are one hop further out than this
             # page itself -- don't even queue them if that would exceed
@@ -371,49 +385,87 @@ def crawl(
         if playwright_cm is not None:
             playwright_cm.stop()
 
-    return {
-        "urls": discovered_output,
-        "pages_traversed": len(visited_traversal),
-        "errors": errors,
+    yield {
+        "event": "complete",
+        "result": {
+            "urls": discovered_output,
+            "pages_traversed": len(visited_traversal),
+            "errors": errors,
+        },
     }
 
 
-def discover_urls(
+def crawl(
     start_url: str,
     max_pages: int | None = 10,
     max_depth: int | None = None,
     path_specific_strip: dict[str, set[str]] | None = None,
     timeout_seconds: float | None = None,
 ) -> dict:
-    """The feature-level entry point -- this is what the API layer will
-    eventually call. crawl() is the traversal engine; this is the
-    contract + safety boundary around it: it decides what a crawl's
-    outcome MEANS (success/partial/failed) and guarantees nothing ever
-    raises out of here, the same lesson from tech_detection's pipeline.py
-    (a caller of an API can't be expected to catch arbitrary Python
-    exceptions -- it needs one predictable response shape either way).
+    """Non-streaming convenience wrapper, same contract this had before
+    streaming existed -- exhausts crawl_stream() and returns just its
+    final result."""
+    for event in crawl_stream(
+        start_url,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        path_specific_strip=path_specific_strip,
+        timeout_seconds=timeout_seconds,
+    ):
+        if event["event"] == "complete":
+            return event["result"]
 
-    crawl() itself only ever records expected per-page failures
-    (RequestException) and keeps going. Anything else escaping crawl()
-    -- a real bug, not a bad page -- is caught here and reported the
-    same way a totally-unreachable start_url would be: status "failed".
-    """
+
+def discover_urls_stream(
+    start_url: str,
+    max_pages: int | None = 10,
+    max_depth: int | None = None,
+    path_specific_strip: dict[str, set[str]] | None = None,
+    timeout_seconds: float | None = None,
+):
+    """The feature-level streaming entry point -- crawl_stream() is the
+    traversal engine; this is the contract + safety boundary around it,
+    same division as discover_urls() always had: it decides what a
+    crawl's outcome MEANS (success/partial/failed) and guarantees nothing
+    ever raises out of here, the same lesson from tech_detection's
+    pipeline.py (a caller of an API can't be expected to catch arbitrary
+    Python exceptions -- it needs one predictable response shape either
+    way).
+
+    Passes every "url_discovered" event through unchanged, then yields
+    its OWN "complete" event carrying the full public contract --
+    {status, start_url, discovered_urls, pages_traversed, errors} -- the
+    same shape discover_urls() has always returned.
+
+    crawl_stream() itself only ever records expected per-page failures
+    (RequestException) and keeps going. Anything else escaping it -- a
+    real bug, not a bad page -- is caught here and reported the same way
+    a totally-unreachable start_url would be: status "failed"."""
     try:
-        result = crawl(
+        result = None
+        for event in crawl_stream(
             start_url,
             max_pages=max_pages,
             max_depth=max_depth,
             path_specific_strip=path_specific_strip,
             timeout_seconds=timeout_seconds,
-        )
+        ):
+            if event["event"] == "url_discovered":
+                yield event
+            else:
+                result = event["result"]
     except Exception as exc:
-        return {
-            "status": "failed",
-            "start_url": start_url,
-            "discovered_urls": [],
-            "pages_traversed": 0,
-            "errors": [{"url": start_url, "error": str(exc)}],
+        yield {
+            "event": "complete",
+            "result": {
+                "status": "failed",
+                "start_url": start_url,
+                "discovered_urls": [],
+                "pages_traversed": 0,
+                "errors": [{"url": start_url, "error": str(exc)}],
+            },
         }
+        return
 
     if result["pages_traversed"] == 0:
         # Nothing was ever successfully fetched -- not even the start
@@ -426,13 +478,37 @@ def discover_urls(
     else:
         status = "success"
 
-    return {
-        "status": status,
-        "start_url": start_url,
-        "discovered_urls": result["urls"],
-        "pages_traversed": result["pages_traversed"],
-        "errors": result["errors"],
+    yield {
+        "event": "complete",
+        "result": {
+            "status": status,
+            "start_url": start_url,
+            "discovered_urls": result["urls"],
+            "pages_traversed": result["pages_traversed"],
+            "errors": result["errors"],
+        },
     }
+
+
+def discover_urls(
+    start_url: str,
+    max_pages: int | None = 10,
+    max_depth: int | None = None,
+    path_specific_strip: dict[str, set[str]] | None = None,
+    timeout_seconds: float | None = None,
+) -> dict:
+    """Non-streaming convenience wrapper, same contract this had before
+    streaming existed -- exhausts discover_urls_stream() and returns just
+    its final result."""
+    for event in discover_urls_stream(
+        start_url,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        path_specific_strip=path_specific_strip,
+        timeout_seconds=timeout_seconds,
+    ):
+        if event["event"] == "complete":
+            return event["result"]
 
 
 if __name__ == "__main__":
