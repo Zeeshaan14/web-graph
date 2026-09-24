@@ -789,6 +789,57 @@ class TestRobotsTxt:
         assert result["urls"] == []
         assert result["pages_traversed"] == 0
 
+    def test_403_on_robots_txt_surfaces_a_clear_reason_not_an_empty_errors_list(self):
+        # Regression: a whole-site 401/403 block used to leave the crawl
+        # silently empty -- status "failed", errors: [] -- with no way to
+        # tell why. Reproduced against a real site (a Cloudflare
+        # bot-challenge page returning 403 for /robots.txt itself, not a
+        # deliberate policy from the site's real robots.txt).
+        def fake_get(url, timeout=10, **kwargs):
+            if url == "https://example.com/robots.txt":
+                response = MagicMock(status_code=403, headers={})
+                error = requests.HTTPError("403 error")
+                error.response = response
+                response.raise_for_status.side_effect = error
+                return response
+            if url == "https://example.com/sitemap.xml":
+                return make_not_found_response(url)
+            raise AssertionError(f"unexpected fetch while robots.txt should have blocked everything: {url}")
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = discover_urls("https://example.com/", max_pages=10, max_depth=1)
+
+        assert result["status"] == "failed"
+        assert len(result["errors"]) == 1
+        assert result["errors"][0]["url"] == "https://example.com/"
+        assert "403" in result["errors"][0]["error"]
+        assert "robots.txt" in result["errors"][0]["error"]
+
+    def test_ignore_robots_txt_true_proceeds_past_a_403_without_the_extra_error(self):
+        pages = {
+            "https://example.com/": ("https://example.com/", "<html>home</html>"),
+        }
+
+        def fake_get(url, timeout=10, **kwargs):
+            if url == "https://example.com/robots.txt":
+                response = MagicMock(status_code=403, headers={})
+                error = requests.HTTPError("403 error")
+                error.response = response
+                response.raise_for_status.side_effect = error
+                return response
+            return make_fake_get(pages)(url, timeout=timeout, **kwargs)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = discover_urls(
+                "https://example.com/", max_pages=10, max_depth=0, ignore_robots_txt=True,
+            )
+
+        assert result["status"] == "success"
+        assert result["discovered_urls"] == ["https://example.com/"]
+        assert result["errors"] == []
+
     def test_connection_error_fetching_robots_txt_does_not_block_the_crawl(self):
         # Erring toward "allowed" here: a network hiccup fetching
         # robots.txt itself is not evidence the site wants nothing

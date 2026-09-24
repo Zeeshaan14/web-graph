@@ -116,7 +116,7 @@ def _in_scope(
     return True
 
 
-def _load_robots_policy(session, scheme: str, domain: str) -> RobotFileParser:
+def _load_robots_policy(session, scheme: str, domain: str) -> tuple[RobotFileParser, str | None]:
     """Fetches and parses robots.txt for the site being crawled -- always
     on, not a caller-toggled option, same as the politeness pacing in
     fetcher.py. Mirrors the standard library's own RobotFileParser.read()
@@ -124,7 +124,21 @@ def _load_robots_policy(session, scheme: str, domain: str) -> RobotFileParser:
     off-limits (disallow_all), any other error (404, connection failure,
     timeout, ...) -> no robots.txt to restrict us (allow_all). This one
     fetch doesn't count toward max_pages/pages_traversed -- it's crawler
-    policy, not a discovered page."""
+    policy, not a discovered page.
+
+    Returns (policy, disallow_reason) -- disallow_reason is a human
+    -readable explanation, non-None only when disallow_all just got set.
+    Without this, a whole-site block from robots.txt made every
+    subsequent page skip SILENTLY (dispatch()'s robots.txt check is a
+    bare `continue`, by design, since an ordinary per-path Disallow rule
+    isn't worth an error entry of its own) -- for a 401/403 specifically,
+    that meant a crawl could come back as status "failed" with an empty
+    errors list and no way to tell why. A real, reproduced case: a site
+    behind Cloudflare returning 403 on /robots.txt itself (bot-challenge
+    blocking the crawler's own request, not a deliberate policy from the
+    site's real robots.txt), which this rule -- correctly, per the
+    RobotFileParser convention it mirrors -- still treats as "site says
+    stay out"."""
     policy = RobotFileParser()
     robots_url = f"{scheme}://{domain}/robots.txt"
 
@@ -135,8 +149,14 @@ def _load_robots_policy(session, scheme: str, domain: str) -> RobotFileParser:
         status = exc.response.status_code if exc.response is not None else None
         if status in (401, 403):
             policy.disallow_all = True
-        else:
-            policy.allow_all = True
+            return policy, (
+                f"'{robots_url}' returned {status} -- treating the whole site as "
+                "off-limits (a 401/403 on robots.txt itself conventionally means "
+                "\"don't crawl this site\", the same rule Python's own robotparser "
+                "follows). If this is unexpected, the response may be a bot-challenge "
+                "page (e.g. Cloudflare) rather than the site's real robots.txt policy."
+            )
+        policy.allow_all = True
     except (requests.RequestException, UnsafeURLError):
         # UnsafeURLError here would mean robots_url -- built from
         # start_url's own already-validated scheme+domain -- resolved
@@ -144,7 +164,7 @@ def _load_robots_policy(session, scheme: str, domain: str) -> RobotFileParser:
         # earlier; same treatment as any other fetch failure.
         policy.allow_all = True
 
-    return policy
+    return policy, None
 
 
 def _discover_sitemap_urls(
@@ -332,7 +352,7 @@ def crawl_stream(
 
     session = new_session()
 
-    robots_policy = _load_robots_policy(session, start_parsed.scheme, start_domain)
+    robots_policy, robots_disallow_reason = _load_robots_policy(session, start_parsed.scheme, start_domain)
     sitemap_urls = _discover_sitemap_urls(
         session, start_parsed.scheme, start_domain, robots_policy, path_specific_strip,
         ignore_query_parameters, allow_subdomains,
@@ -377,7 +397,20 @@ def crawl_stream(
     # error, a 429 that didn't recover after fetcher's one retry). This
     # is not a reason to stop the crawl; it's data for discover_urls()
     # to decide what the overall outcome means.
-    errors = []
+    #
+    # Seeded with the robots.txt block reason, if there was one -- every
+    # subsequent per-page robots.txt skip in dispatch() below stays a
+    # silent `continue` (an ordinary per-path Disallow rule isn't worth
+    # its own error entry), but a whole-SITE 401/403 block deserves one
+    # explicit entry explaining why nothing got crawled, instead of a
+    # "failed" result with nothing in errors to say why. Skipped when
+    # ignore_robots_txt=True -- the crawl proceeds anyway in that case,
+    # so surfacing this would just be a confusing, irrelevant message.
+    errors = (
+        [{"url": start_url, "error": robots_disallow_reason}]
+        if robots_disallow_reason and not ignore_robots_txt
+        else []
+    )
 
     # Browser lifecycle for this crawl: launched lazily (most sites never
     # need it), reused across every page that does, and closed once at the
