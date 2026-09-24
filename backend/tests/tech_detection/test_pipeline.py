@@ -8,6 +8,7 @@ from unittest.mock import patch
 import requests
 
 import tech_detection.pipeline as pipeline
+from security.ssrf_guard import UnsafeURLError
 from tests.fakes import FakeResponse, FakeSession
 
 CLOUDFLARE_HEADERS = {"cf-ray": "abc123", "server": "cloudflare"}
@@ -57,6 +58,19 @@ class TestFetchFailuresNeverRaise:
 
         assert result["status"] == "failed"
         assert result["errors"][0]["type"] == "timeout"
+
+    def test_unsafe_url_is_its_own_error_type_not_folded_into_invalid_url(self):
+        # fetch_url() now validates via security.ssrf_guard before it
+        # ever reaches requests -- a loopback/private/link-local/metadata
+        # target raises UnsafeURLError, which is a distinct security-
+        # policy decision, not a malformed-input one.
+        exc = UnsafeURLError("'127.0.0.1' resolves to 127.0.0.1, a non-public address -- refusing to fetch it")
+        with patch("tech_detection.pipeline.fetch_url", side_effect=exc):
+            result = pipeline.detect_website_technologies("http://127.0.0.1/")
+
+        assert result["status"] == "failed"
+        assert result["errors"][0]["type"] == "unsafe_url"
+        assert result["errors"][0]["message"] == str(exc)
 
     def test_generic_request_exception(self):
         with patch("tech_detection.pipeline.fetch_url", side_effect=requests.exceptions.RequestException("weird")):

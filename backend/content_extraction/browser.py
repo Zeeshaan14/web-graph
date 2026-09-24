@@ -13,6 +13,8 @@
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+from security.ssrf_guard import assert_safe_url, install_navigation_guard
+
 # Same proxy and threshold tech_detection/fallback.py calibrated against
 # real pages (and url_discovery/browser.py duplicates for the same
 # reason): a bare SPA shell measures 0 visible text, example.com's real
@@ -39,13 +41,23 @@ def render_page_html(url: str) -> str:
     """Launches Chromium, renders one URL, returns its content, closes
     Chromium -- single-shot, since content_extraction only ever handles
     one URL per call and there's no reason to keep a browser alive
-    between calls the way a multi-page crawl would."""
+    between calls the way a multi-page crawl would.
+
+    Validates url up front (fails before even launching Chromium) and
+    installs a navigation guard on the page (catches a redirect DURING
+    rendering) -- see security.ssrf_guard. fetch_and_prepare()'s own
+    try/except around this call already falls back to the raw HTML on
+    any render failure, so either one failing needs no caller-side
+    change."""
+    assert_safe_url(url)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
 
         try:
             context = browser.new_context()
             page = context.new_page()
+            install_navigation_guard(page)
             page.goto(url, wait_until="networkidle", timeout=30_000)
             return page.content()
         finally:

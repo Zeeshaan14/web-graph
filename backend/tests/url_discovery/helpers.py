@@ -18,6 +18,7 @@ def make_not_found_response(url):
     response.url = url
     response.text = ""
     response.headers = {}
+    response.is_redirect = False
     error = requests.HTTPError("404 error")
     error.response = response
     response.raise_for_status.side_effect = error
@@ -38,7 +39,11 @@ def make_fake_get(pages, call_log=None):
     both, and most tests here aren't testing robots.txt/sitemap behavior
     at all, so they'd otherwise all need a page they don't care about."""
 
-    def fake_get(url, timeout=10):
+    def fake_get(url, timeout=10, **kwargs):
+        # **kwargs swallows allow_redirects=False -- security.ssrf_guard.safe_get()
+        # (now wrapping every fetch() call) always passes it explicitly,
+        # since it owns following redirects itself rather than trusting
+        # requests' own allow_redirects=True.
         is_infra_request = url.endswith("/robots.txt") or url.endswith("/sitemap.xml")
 
         if call_log is not None and not is_infra_request:
@@ -57,6 +62,9 @@ def make_fake_get(pages, call_log=None):
         response.url = final_url
         response.text = html
         response.headers = {"content-type": content_type} if content_type else {}
+        # Explicit, not relying on a MagicMock's default truthiness --
+        # safe_get() checks this to decide whether to follow a redirect.
+        response.is_redirect = False
 
         if status_code >= 400:
             response.raise_for_status.side_effect = requests.HTTPError(f"{status_code} error")

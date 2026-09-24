@@ -9,6 +9,8 @@
 from bs4 import BeautifulSoup
 from playwright.sync_api import Browser
 
+from security.ssrf_guard import assert_safe_url, install_navigation_guard
+
 # Same proxy and threshold tech_detection/fallback.py already calibrated
 # against real pages: a bare SPA shell (<div id="root"></div> + a script
 # tag) measures 0 visible text, example.com's real (if sparse) content
@@ -37,9 +39,19 @@ def render_page_html(browser: Browser, url: str) -> str:
     caller owns the browser's lifecycle (launched once, reused across
     every page in a crawl that needs rendering, rather than paying
     Chromium startup cost per page). Its own context is opened and closed
-    per call so pages don't share cookies/storage with each other."""
+    per call so pages don't share cookies/storage with each other.
+
+    Validates url up front (fails before even opening a context) and
+    installs a navigation guard on the page (catches a redirect DURING
+    rendering) -- see security.ssrf_guard. Either one raises/aborts into
+    the same exception crawler.py's own try/except around this call
+    already falls back from (raw HTML instead of a render), so no
+    caller-side change was needed for this."""
+    assert_safe_url(url)
+
     context = browser.new_context()
     page = context.new_page()
+    install_navigation_guard(page)
 
     try:
         page.goto(url, wait_until="networkidle", timeout=30_000)

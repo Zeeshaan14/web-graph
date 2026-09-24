@@ -218,6 +218,21 @@ class TestFailureHandling:
         assert result["status"] == "failed"
         assert result["error"] == "timed out"
 
+    def test_unsafe_url_is_rejected_before_any_request(self):
+        # A loopback/private/link-local/metadata target never reaches
+        # requests.get() at all -- security.ssrf_guard.safe_get() (inside
+        # _fetch()) rejects it first. Overrides the conftest-wide DNS mock
+        # (which resolves everything to a safe public IP by default) with
+        # a loopback address for this one test.
+        with patch(PATCH_TARGET) as mock_get, \
+             patch("security.ssrf_guard.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 0))]):
+            result = extract_content("http://127.0.0.1/")
+
+        mock_get.assert_not_called()
+        assert result["status"] == "failed"
+        assert "127.0.0.1" in result["error"]
+        assert "non-public address" in result["error"]
+
     def test_http_error_status_returns_failed(self):
         with patch(PATCH_TARGET, return_value=make_response("", status=404)):
             result = extract_content("https://example.com/missing")

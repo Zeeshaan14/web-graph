@@ -44,6 +44,8 @@
 
 import requests
 
+from security.ssrf_guard import UnsafeURLError
+
 from .fetcher import fetch_url
 from .evidence import build_evidence, merge_evidence
 from .engine import detect_technologies
@@ -94,6 +96,15 @@ def detect_website_technologies(url: str):
     # never got a response at all, so http_status stays None.
     try:
         response, session = fetch_url(url)
+    except UnsafeURLError as exc:
+        # fetch_url() now validates via security.ssrf_guard.safe_get()
+        # before it ever reaches requests -- a bad scheme or no hostname
+        # raises this instead of requests.exceptions.MissingSchema, and a
+        # loopback/private/link-local/metadata target raises it too
+        # (deliberately its own error_type, not folded into
+        # "invalid_url": this is a security policy decision, not a
+        # malformed-input one).
+        return _failed_result(url, "unsafe_url", str(exc))
     except requests.exceptions.MissingSchema:
         return _failed_result(url, "invalid_url", f"'{url}' is not a valid URL (missing scheme, e.g. https://)")
     except requests.exceptions.ConnectionError as exc:

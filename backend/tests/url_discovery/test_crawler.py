@@ -423,7 +423,7 @@ class TestWallClockTimeout:
 
 class TestFailedRequestIsRecordedNotFatal:
     def test_a_persistently_failing_link_is_recorded_as_an_error_and_does_not_stop_the_crawl(self):
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
                 return make_not_found_response(url)
 
@@ -455,7 +455,7 @@ class TestFailedRequestIsRecordedNotFatal:
         assert result["pages_traversed"] == 2
 
     def test_dns_failure_is_recorded_with_a_friendly_message(self):
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
                 return make_not_found_response(url)
 
@@ -526,7 +526,7 @@ class TestDiscoverUrls:
         }
 
     def test_partial_when_some_pages_fail_but_others_succeed(self):
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
                 return make_not_found_response(url)
 
@@ -556,7 +556,7 @@ class TestDiscoverUrls:
         assert "https://example.com/ok/" in result["discovered_urls"]
 
     def test_failed_when_start_url_itself_fails(self):
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             raise requests.ConnectionError("Connection timed out")
 
         with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
@@ -575,7 +575,7 @@ class TestDiscoverUrls:
         # The specific rule called out explicitly: a single 404 deep in
         # an otherwise-successful crawl must not be treated the same as
         # "we couldn't meaningfully crawl the site at all."
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
                 return make_not_found_response(url)
 
@@ -700,7 +700,7 @@ class TestStreamingEvents:
         assert events[-1]["result"] == direct_result
 
     def test_discover_urls_stream_failure_still_goes_straight_to_a_failed_complete_event(self):
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             raise requests.ConnectionError("Connection timed out")
 
         with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
@@ -771,7 +771,7 @@ class TestRobotsTxt:
         assert result["urls"] == ["https://example.com/"]
 
     def test_403_on_robots_txt_blocks_the_entire_crawl(self):
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             if url == "https://example.com/robots.txt":
                 response = MagicMock(status_code=403, headers={})
                 error = requests.HTTPError("403 error")
@@ -794,7 +794,7 @@ class TestRobotsTxt:
         # robots.txt itself is not evidence the site wants nothing
         # crawled, and silently killing the whole crawl over it would be
         # a worse failure mode than proceeding.
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             if url == "https://example.com/robots.txt":
                 raise requests.ConnectionError("robots.txt unreachable")
             if url == "https://example.com/sitemap.xml":
@@ -1377,7 +1377,7 @@ class TestConcurrentDiscovery:
     def _tracking_fake_get(self, pages, in_flight_holder):
         lock = threading.Lock()
 
-        def fake_get(url, timeout=10):
+        def fake_get(url, timeout=10, **kwargs):
             if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
                 return make_not_found_response(url)
 
@@ -1502,3 +1502,66 @@ class TestConcurrentDiscovery:
             crawl("https://example.com/", max_pages=10, max_depth=0, delay_seconds=2.5)
 
         assert any(call.args == (2.5,) for call in mock_sleep.call_args_list)
+
+
+class TestSSRFProtection:
+    """crawl()/fetch() now validate every target via
+    security.ssrf_guard before fetching it -- see tests/security/
+    test_ssrf_guard.py for the guard's own unit tests. These confirm
+    the crawler WIRES it in correctly: an unsafe start_url fails the
+    whole crawl cleanly, and an unsafe DISCOVERED link is recorded as a
+    normal per-page error without taking the rest of the crawl down."""
+
+    def _addrinfo_for(self, mapping, default_ip="93.184.216.34"):
+        """mapping: {hostname: ip}. Any hostname not in mapping resolves
+        to default_ip (a safe public address) -- lets a test single out
+        just the ONE hostname it cares about as unsafe."""
+
+        def fake_getaddrinfo(hostname, *_args, **_kwargs):
+            ip = mapping.get(hostname, default_ip)
+            return [(2, 1, 6, "", (ip, 0))]
+
+        return fake_getaddrinfo
+
+    def test_unsafe_start_url_fails_the_whole_crawl_cleanly(self):
+        with patch(
+            "security.ssrf_guard.socket.getaddrinfo",
+            side_effect=self._addrinfo_for({"127.0.0.1": "127.0.0.1"}),
+        ):
+            result = discover_urls("http://127.0.0.1/", max_pages=10, max_depth=1)
+
+        assert result["status"] == "failed"
+        assert result["discovered_urls"] == []
+        assert "127.0.0.1" in result["errors"][0]["error"]
+
+    def test_discovered_link_resolving_unsafe_is_a_per_page_error_not_a_crawl_failure(self):
+        # A same-site link is filtered out by extract_links() entirely
+        # before it would ever reach a fetch (see is_same_site()), so
+        # this needs allow_external_links=True -- a caller who opted
+        # into following cross-site links still needs THOSE checked too,
+        # not just the ones same-site by hostname.
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="http://internal.example.com/">Internal</a><a href="/ok/">OK</a>',
+            ),
+            "https://example.com/ok/": ("https://example.com/ok/", "<html>ok</html>"),
+        }
+        call_log = []
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=make_fake_get(pages, call_log)), \
+             patch("url_discovery.fetcher.time.sleep"), \
+             patch(
+                 "security.ssrf_guard.socket.getaddrinfo",
+                 side_effect=self._addrinfo_for({"internal.example.com": "10.0.0.5"}),
+             ):
+            result = discover_urls(
+                "https://example.com/", max_pages=10, max_depth=1, allow_external_links=True,
+            )
+
+        # The unsafe link was never actually requested...
+        assert "http://internal.example.com/" not in call_log
+        # ...and the REST of the crawl still completed normally.
+        assert result["status"] == "partial"
+        assert "https://example.com/ok/" in result["discovered_urls"]
+        assert any("internal.example.com" in err["error"] for err in result["errors"])

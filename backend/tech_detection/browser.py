@@ -5,12 +5,22 @@
 
 from playwright.sync_api import sync_playwright
 
+from security.ssrf_guard import assert_safe_url, install_navigation_guard
+
 
 def collect_browser_evidence(url: str):
+    # Validated up front (fails before Chromium ever launches) and again
+    # on every navigation the page makes (catches a redirect DURING
+    # rendering) -- see security.ssrf_guard. pipeline.py's own try/except
+    # around this call already falls back to the HTTP-only result on any
+    # browser failure, so either one failing needs no caller-side change.
+    assert_safe_url(url)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context()
         page = context.new_page()
+        install_navigation_guard(page)
 
         try:
             page.goto(

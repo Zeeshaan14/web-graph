@@ -24,6 +24,8 @@ from xml.etree import ElementTree
 import requests
 from playwright.sync_api import sync_playwright
 
+from security.ssrf_guard import UnsafeURLError, assert_safe_url
+
 from .browser import render_page_html, should_render_with_browser
 from .fetcher import fetch, new_session
 from .link_extraction import extract_canonical, extract_links, is_same_site, normalize_url
@@ -59,13 +61,13 @@ _DNS_FAILURE_MARKERS = (
 )
 
 
-def _friendly_fetch_error(url: str, exc: requests.RequestException) -> str:
+def _friendly_fetch_error(url: str, exc: requests.RequestException | UnsafeURLError) -> str:
     """requests' own str(exc) for a ConnectionError is an internal repr --
     "HTTPSConnectionPool(host=..., port=443): Max retries exceeded with
     url: / (Caused by NameResolutionError(...))" -- technically accurate,
     not something worth showing someone who just typed a URL into a form.
-    Anything else (HTTPError, Timeout, ...) already has a reasonably clean
-    str() of its own, left as-is."""
+    Anything else (HTTPError, Timeout, UnsafeURLError, ...) already has a
+    reasonably clean str() of its own, left as-is."""
     if isinstance(exc, requests.exceptions.ConnectionError) and any(
         marker in str(exc) for marker in _DNS_FAILURE_MARKERS
     ):
@@ -135,7 +137,11 @@ def _load_robots_policy(session, scheme: str, domain: str) -> RobotFileParser:
             policy.disallow_all = True
         else:
             policy.allow_all = True
-    except requests.RequestException:
+    except (requests.RequestException, UnsafeURLError):
+        # UnsafeURLError here would mean robots_url -- built from
+        # start_url's own already-validated scheme+domain -- resolved
+        # somewhere unsafe on THIS lookup despite start_url passing
+        # earlier; same treatment as any other fetch failure.
         policy.allow_all = True
 
     return policy
@@ -163,7 +169,7 @@ def _discover_sitemap_urls(
 
     try:
         response = fetch(session, sitemap_url)
-    except requests.RequestException:
+    except (requests.RequestException, UnsafeURLError):
         return []
 
     try:
@@ -303,6 +309,17 @@ def crawl_stream(
         max_concurrency = 1
 
     start_url = normalize_url(start_url, path_specific_strip, ignore_query_parameters)
+
+    # Validated once, up front, rather than only where fetch() happens to
+    # be called from -- a caller asking to crawl a loopback/private/
+    # link-local/metadata target should get one clean failure, not a
+    # confusing error surfacing from deep inside robots.txt/sitemap
+    # fetching. Left uncaught here on purpose: this propagates out to
+    # discover_urls_stream()'s own except Exception, which turns it into
+    # a normal status: "failed" result -- the same path a totally-
+    # unreachable start_url already takes.
+    assert_safe_url(start_url)
+
     start_parsed = urlparse(start_url)
     start_domain = start_parsed.netloc
     start_path = start_parsed.path or "/"
@@ -447,7 +464,14 @@ def crawl_stream(
 
                     try:
                         response = future.result()
-                    except requests.RequestException as exc:
+                    except (requests.RequestException, UnsafeURLError) as exc:
+                        # UnsafeURLError (a discovered link resolving to a
+                        # loopback/private/link-local/metadata address, or
+                        # redirecting to one) is treated exactly like any
+                        # other per-page fetch failure -- recorded, crawl
+                        # continues. A malicious or misconfigured link on
+                        # someone else's page is an expected thing a real
+                        # crawl can encounter, not a bug in this code.
                         logger.warning("Failed to fetch %s: %s", current_url, exc)
                         errors.append({"url": current_url, "error": _friendly_fetch_error(current_url, exc)})
                         continue

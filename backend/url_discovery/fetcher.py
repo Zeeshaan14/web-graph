@@ -10,6 +10,8 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
+from security.ssrf_guard import safe_get
+
 # Some sites (realpython.com among them) reject requests that look like a
 # bare script rather than a browser -- default `python-requests/x.x.x`
 # gets a flat 403. A real browser sends a full header set, not just a
@@ -74,9 +76,16 @@ def fetch(session: requests.Session, url: str, delay_seconds: float | None = Non
     delay_seconds overrides the default REQUEST_DELAY_SECONDS pacing gap
     -- None (the default) keeps the standard pacing; a caller running
     fetch() concurrently across several worker threads passes its own
-    per-call delay this way rather than mutating the module constant."""
+    per-call delay this way rather than mutating the module constant.
+
+    Also raises security.ssrf_guard.UnsafeURLError -- via safe_get(), not
+    a bare session.get() -- if url (or a redirect it leads to) resolves
+    to a loopback/private/link-local/metadata address. Callers already
+    handling RequestException for a per-page failure should handle this
+    the same way: a discovered link pointing somewhere unsafe is a normal
+    thing a real crawl can encounter, not a bug in this code."""
     try:
-        response = session.get(url, timeout=10)
+        response = safe_get(session, url, timeout=10)
 
         if response.status_code == 429:
             wait_seconds = _parse_retry_after(response.headers.get("Retry-After"))
@@ -87,7 +96,7 @@ def fetch(session: requests.Session, url: str, delay_seconds: float | None = Non
             print(f"429 rate limited: {url} -- waiting {wait_seconds:.1f}s before one retry")
             time.sleep(wait_seconds)
 
-            response = session.get(url, timeout=10)
+            response = safe_get(session, url, timeout=10)
 
         response.raise_for_status()
         return response

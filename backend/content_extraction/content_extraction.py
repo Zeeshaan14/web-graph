@@ -9,6 +9,8 @@ import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
+from security.ssrf_guard import UnsafeURLError, safe_get
+
 from .browser import render_page_html, should_render_with_browser
 
 logger = logging.getLogger(__name__)
@@ -75,9 +77,16 @@ def _fetch(url: str) -> requests.Response:
     delay after every attempt regardless of outcome. Does NOT call
     raise_for_status() -- that's extract_content()'s job, same division as
     url_discovery: this owns fetching, the caller owns what a bad status
-    means."""
+    means.
+
+    Uses safe_get() (session=None, so it calls requests.get() per hop
+    directly, same as this always has) rather than a bare requests.get()
+    -- validates url, and every redirect hop it follows, isn't a
+    loopback/private/link-local/metadata address first. Raises
+    security.ssrf_guard.UnsafeURLError if it isn't; fetch_and_prepare()
+    below treats that the same as any other fetch failure."""
     try:
-        response = requests.get(url, headers=BROWSER_HEADERS, timeout=10, stream=True)
+        response = safe_get(None, url, headers=BROWSER_HEADERS, timeout=10, stream=True)
 
         if response.status_code == 429:
             wait_seconds = _parse_retry_after(response.headers.get("Retry-After"))
@@ -87,7 +96,7 @@ def _fetch(url: str) -> requests.Response:
 
             time.sleep(wait_seconds)
 
-            response = requests.get(url, headers=BROWSER_HEADERS, timeout=10, stream=True)
+            response = safe_get(None, url, headers=BROWSER_HEADERS, timeout=10, stream=True)
 
         return response
     finally:
@@ -212,7 +221,7 @@ def fetch_and_prepare(url: str) -> dict:
 
         return {"status": "success", "url": url, "title": title, "body": body, "error": None}
 
-    except requests.RequestException as exc:
+    except (requests.RequestException, UnsafeURLError) as exc:
         return _prepare_failed(url, _friendly_request_error(url, exc))
 
 
@@ -235,13 +244,14 @@ _DNS_FAILURE_MARKERS = (
 )
 
 
-def _friendly_request_error(url: str, exc: requests.RequestException) -> str:
+def _friendly_request_error(url: str, exc: requests.RequestException | UnsafeURLError) -> str:
     """requests' own str(exc) for a ConnectionError is an internal repr --
     "HTTPSConnectionPool(host=..., port=443): Max retries exceeded with
     url: / (Caused by NameResolutionError(...))" -- technically accurate,
     not something worth showing someone who just typed a URL into a form.
-    Anything else (HTTPError from raise_for_status(), Timeout, ...)
-    already has a reasonably clean str() of its own, left as-is."""
+    Anything else (HTTPError from raise_for_status(), Timeout,
+    UnsafeURLError, ...) already has a reasonably clean str() of its own,
+    left as-is."""
     if isinstance(exc, requests.exceptions.ConnectionError) and any(
         marker in str(exc) for marker in _DNS_FAILURE_MARKERS
     ):

@@ -14,6 +14,7 @@
 
 import http.server
 import threading
+from unittest.mock import patch
 
 import pytest
 
@@ -63,7 +64,13 @@ def spa_shell_server():
 
 
 def test_bare_spa_shell_content_is_only_found_via_a_real_browser_render(spa_shell_server):
-    result = extract_content(spa_shell_server)
+    # spa_shell_server is 127.0.0.1 -- loopback, correctly rejected by
+    # security.ssrf_guard as an SSRF target in real use. This fixture is
+    # a deliberate, controlled local test server, not an attacker-
+    # controlled one, so the check is bypassed for this one test rather
+    # than weakened anywhere in the actual guard.
+    with patch("security.ssrf_guard._is_unsafe_ip", return_value=False):
+        result = extract_content(spa_shell_server)
 
     assert result["status"] == "success"
     assert result["title"] == "Real Rendered Title"
