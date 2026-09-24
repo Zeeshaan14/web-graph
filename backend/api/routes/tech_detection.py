@@ -9,6 +9,7 @@ from fastapi import APIRouter
 
 from tech_detection.pipeline import detect_website_technologies
 
+from ..concurrency import limit_concurrency
 from ..schemas.tech_detection import DetectRequest, DetectResponse
 
 router = APIRouter()
@@ -16,5 +17,6 @@ router = APIRouter()
 
 @router.post("/detect-tech", response_model=DetectResponse)
 def detect_tech(request: DetectRequest) -> DetectResponse:
-    result = detect_website_technologies(request.url)
+    with limit_concurrency():
+        result = detect_website_technologies(request.url)
     return DetectResponse(**result)

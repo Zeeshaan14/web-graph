@@ -547,6 +547,25 @@ let a caller request an effectively unlimited crawl, since with the crawler's
 ~1s politeness delay per page that ties up a synchronous request for a very
 long time.
 
+### Configuration
+
+All optional, read from the environment (`backend/api/config.py`) — none of
+these need to be set for local dev, which is exactly today's behavior either
+way:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `API_KEY` | unset (auth off) | When set, every route except `/health` requires it on an `X-API-Key` header. A startup log warns loudly if it's unset — see `backend/api/auth.py`. |
+| `RATE_LIMIT_PER_MINUTE` | `30` | Per-client-IP cap, shared across all four APIs. `backend/api/rate_limiting.py`. |
+| `MAX_CONCURRENT_REQUESTS` | `10` | Process-wide cap on simultaneous crawl/extract/detect requests, independent of any one request's own `max_concurrency`. `backend/api/concurrency.py`. |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated allowed origins. |
+
+The frontend sends `X-API-Key` automatically when `NEXT_PUBLIC_API_KEY` is set
+(`frontend/.env.local.example`) — note that being a `NEXT_PUBLIC_*` var, it's
+visible in the browser bundle, so it deters automated abuse of the bare API
+rather than acting as a real secret against someone inspecting this site's own
+requests.
+
 ## Testing
 
 ```bash

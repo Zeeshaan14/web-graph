@@ -7,6 +7,18 @@ import { crawlScopeOptionsToRequestFields, type CrawlScopeOptions } from "./craw
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
+// Sent as X-API-Key on every request below when set -- matches
+// backend/api/auth.py, a no-op there unless the backend's own API_KEY is
+// set too (see .env.local.example). NEXT_PUBLIC_* is baked into the
+// client bundle, so this is NOT a secret from anyone inspecting this
+// site's own network requests -- it only deters casual/automated abuse
+// of the bare API by something that never loads this frontend at all.
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY;
+
+function authHeaders(): Record<string, string> {
+  return API_KEY ? { "X-API-Key": API_KEY } : {};
+}
+
 export class ApiError extends Error {}
 
 // ---- tech_detection ------------------------------------------------------
@@ -126,7 +138,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify(body),
     });
   } catch {
@@ -156,7 +168,7 @@ export async function discoverAndExtractStream(
   try {
     response = await fetch(`${API_BASE_URL}/discover-and-extract/stream`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({
         url,
         max_pages: maxPages,

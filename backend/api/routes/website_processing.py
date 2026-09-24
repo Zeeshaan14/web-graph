@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from website_processing.pipeline import discover_and_extract, discover_and_extract_stream
 
+from ..concurrency import acquire_concurrency_slot, limit_concurrency, release_concurrency_slot
 from ..schemas.website_processing import DiscoverAndExtractRequest, DiscoverAndExtractResponse
 
 router = APIRouter()
@@ -31,12 +32,13 @@ def _crawl_scope_kwargs(request: DiscoverAndExtractRequest) -> dict:
 
 @router.post("/discover-and-extract", response_model=DiscoverAndExtractResponse)
 def discover_and_extract_route(request: DiscoverAndExtractRequest) -> DiscoverAndExtractResponse:
-    result = discover_and_extract(
-        request.url,
-        max_pages=request.max_pages,
-        max_depth=request.max_depth,
-        **_crawl_scope_kwargs(request),
-    )
+    with limit_concurrency():
+        result = discover_and_extract(
+            request.url,
+            max_pages=request.max_pages,
+            max_depth=request.max_depth,
+            **_crawl_scope_kwargs(request),
+        )
     return DiscoverAndExtractResponse(**result)
 
 
@@ -51,15 +53,26 @@ def discover_and_extract_stream_route(request: DiscoverAndExtractRequest) -> Str
     arrives). A plain `def` (not `async def`), same as every other route
     in this API -- Starlette runs a sync generator body in a thread pool
     automatically, so this doesn't block the event loop even though
-    fetch_and_prepare() underneath makes blocking `requests` calls."""
+    fetch_and_prepare() underneath makes blocking `requests` calls.
+
+    Concurrency-limited via acquire/release, not `with limit_concurrency():`
+    -- see api/concurrency.py's acquire_concurrency_slot() docstring: a
+    StreamingResponse's status/headers go out before its body generator
+    ever runs, so the slot has to be acquired here, synchronously, before
+    the response is even constructed, for a busy server to still come
+    back as a clean 503 instead of a broken 200."""
+    acquire_concurrency_slot()
 
     def event_stream():
-        for event in discover_and_extract_stream(
-            request.url,
-            max_pages=request.max_pages,
-            max_depth=request.max_depth,
-            **_crawl_scope_kwargs(request),
-        ):
-            yield json.dumps(event) + "\n"
+        try:
+            for event in discover_and_extract_stream(
+                request.url,
+                max_pages=request.max_pages,
+                max_depth=request.max_depth,
+                **_crawl_scope_kwargs(request),
+            ):
+                yield json.dumps(event) + "\n"
+        finally:
+            release_concurrency_slot()
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
