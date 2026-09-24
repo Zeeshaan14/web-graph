@@ -559,6 +559,8 @@ way:
 | `RATE_LIMIT_PER_MINUTE` | `30` | Per-client-IP cap, shared across all four APIs. `backend/api/rate_limiting.py`. |
 | `MAX_CONCURRENT_REQUESTS` | `10` | Process-wide cap on simultaneous crawl/extract/detect requests, independent of any one request's own `max_concurrency`. `backend/api/concurrency.py`. |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated allowed origins. |
+| `LOG_LEVEL` | `INFO` | Root logger level. Every log line is one JSON object per line (`backend/api/logging_config.py`), tagged with a `request_id` that's shared across every log line one request produces -- including third-party library logs (`urllib3`, etc.) and the final access-log line -- and echoed back as an `X-Request-ID` response header (honors an inbound one too, for tracing across whatever sits in front of this API). |
+| `SENTRY_DSN` | unset (off) | When set, sends unhandled exceptions to Sentry (`backend/api/error_tracking.py`). Every feature entry point already never raises on its own; this catches anything that could still escape the API layer itself. |
 
 The frontend sends `X-API-Key` automatically when `NEXT_PUBLIC_API_KEY` is set
 (`frontend/.env.local.example`) — note that being a `NEXT_PUBLIC_*` var, it's

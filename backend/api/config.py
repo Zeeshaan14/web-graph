@@ -35,5 +35,17 @@ class Settings(BaseSettings):
     # fan-out WITHIN that one crawl). See api/concurrency.py.
     max_concurrent_requests: int = 10
 
+    # Root logger level -- see api/logging_config.py. INFO by default:
+    # loud enough to see one line per request, quiet enough not to drown
+    # in every DEBUG trace line already scattered through crawler.py etc.
+    log_level: str = "INFO"
+
+    # Unset (the default) means error tracking is OFF -- api/main.py only
+    # calls sentry_sdk.init() when this is present, same
+    # off-by-default-until-configured shape as api_key above. Getting a
+    # DSN means signing up for Sentry (or a compatible self-hosted
+    # instance) -- not something this project can default to having.
+    sentry_dsn: str | None = None
+
 
 settings = Settings()
