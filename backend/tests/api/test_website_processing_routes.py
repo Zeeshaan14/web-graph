@@ -50,6 +50,8 @@ DEFAULT_SCOPE_KWARGS = {
     "allow_external_links": False,
     "ignore_query_parameters": False,
     "ignore_robots_txt": False,
+    "max_concurrency": 1,
+    "delay_seconds": None,
 }
 
 FAILED_RESULT = {

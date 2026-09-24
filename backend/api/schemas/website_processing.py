@@ -31,6 +31,8 @@ class DiscoverAndExtractRequest(BaseModel):
     allow_external_links: bool = Field(default=False)
     ignore_query_parameters: bool = Field(default=False)
     ignore_robots_txt: bool = Field(default=False)
+    max_concurrency: int = Field(default=1, ge=1, le=10)
+    delay_seconds: float | None = Field(default=None, ge=0.0, le=60.0)
 
     _validate_paths = field_validator("include_paths", "exclude_paths")(_validate_path_patterns)
 

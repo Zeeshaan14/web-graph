@@ -35,6 +35,8 @@ def discover_and_extract_stream(
     allow_external_links: bool = False,
     ignore_query_parameters: bool = False,
     ignore_robots_txt: bool = False,
+    max_concurrency: int = 1,
+    delay_seconds: float | None = None,
 ):
     """The real implementation, as a generator of progress events --
     discover_and_extract() below is just this, exhausted for its final
@@ -65,8 +67,9 @@ def discover_and_extract_stream(
 
     include_paths / exclude_paths / regex_on_full_url / restrict_to_start_path /
     allow_subdomains / allow_external_links / ignore_query_parameters /
-    ignore_robots_txt are forwarded straight to discover_urls_stream() --
-    see url_discovery.crawler.crawl_stream() for what each one does. This
+    ignore_robots_txt / max_concurrency / delay_seconds are forwarded
+    straight to discover_urls_stream() -- see
+    url_discovery.crawler.crawl_stream() for what each one does. This
     function owns no scope-decision logic of its own; it only orchestrates
     discovery + extraction + dedup.
     """
@@ -85,6 +88,8 @@ def discover_and_extract_stream(
         allow_external_links=allow_external_links,
         ignore_query_parameters=ignore_query_parameters,
         ignore_robots_txt=ignore_robots_txt,
+        max_concurrency=max_concurrency,
+        delay_seconds=delay_seconds,
     ):
         if event["event"] == "url_discovered":
             yield event
@@ -221,6 +226,8 @@ def discover_and_extract(
     allow_external_links: bool = False,
     ignore_query_parameters: bool = False,
     ignore_robots_txt: bool = False,
+    max_concurrency: int = 1,
+    delay_seconds: float | None = None,
 ):
     """Non-streaming convenience wrapper, same contract this had before
     streaming existed -- exhausts discover_and_extract_stream() and
@@ -239,6 +246,8 @@ def discover_and_extract(
         allow_external_links=allow_external_links,
         ignore_query_parameters=ignore_query_parameters,
         ignore_robots_txt=ignore_robots_txt,
+        max_concurrency=max_concurrency,
+        delay_seconds=delay_seconds,
     ):
         if event["event"] == "complete":
             return event["result"]

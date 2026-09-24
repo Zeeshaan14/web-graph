@@ -15,6 +15,8 @@ import logging
 import re
 import time
 from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 from xml.etree import ElementTree
@@ -198,6 +200,8 @@ def crawl_stream(
     allow_external_links: bool = False,
     ignore_query_parameters: bool = False,
     ignore_robots_txt: bool = False,
+    max_concurrency: int = 1,
+    delay_seconds: float | None = None,
 ):
     """The traversal engine, as a generator of progress events -- crawl()
     below is just this, exhausted for its final event. Split out for the
@@ -268,6 +272,26 @@ def crawl_stream(
     same-site URL is treated as allowed. Off by default: this crawler
     obeys robots.txt unconditionally unless a caller explicitly opts out.
 
+    max_concurrency: how many pages get fetched at once instead of one
+    at a time. 1 (the default) is the original strictly-sequential
+    behavior. Only the network fetch itself runs on a worker thread --
+    everything that touches shared traversal state (the queue, seen/
+    visited sets, browser rendering, output) still runs on this
+    generator's own thread, one completed fetch at a time, so none of it
+    needs a lock. The one honestly-documented trade-off: two same-site
+    URLs that both redirect to the same final destination can both be
+    in flight at once (at max_concurrency > 1) before either has
+    resolved, costing one wasted duplicate fetch -- correctness isn't
+    affected (the existing "already traversed" check after each fetch
+    still catches it), just a small amount of wasted work, and only above
+    the sequential default.
+
+    delay_seconds: an explicit pause between fetches, overriding
+    fetcher.py's default pacing. Passing this FORCES max_concurrency
+    back to 1, the same rule Firecrawl's own delay/maxConcurrency follow
+    -- "wait N seconds between each one" only means something one fetch
+    at a time.
+
     The final event's result is internal traversal data, NOT the public
     API contract -- shaping it into a {status, start_url, discovered_urls,
     ...} response is discover_urls_stream()'s job, not this function's:
@@ -275,6 +299,9 @@ def crawl_stream(
     and keeps going -- it never decides what those failures mean for the
     crawl as a whole, and it never catches anything else. An unexpected
     exception here is meant to propagate out to discover_urls_stream()."""
+    if delay_seconds is not None:
+        max_concurrency = 1
+
     start_url = normalize_url(start_url, path_specific_strip, ignore_query_parameters)
     start_parsed = urlparse(start_url)
     start_domain = start_parsed.netloc
@@ -346,14 +373,37 @@ def crawl_stream(
     browser_unavailable = False
     browser_render_count = 0
 
-    try:
-        while queue and (
-            max_pages is None or len(visited_traversal) < max_pages
-        ):
-            if deadline is not None and time.monotonic() >= deadline:
-                logger.debug("Wall-clock timeout reached, stopping crawl (%.0fs budget)", timeout_seconds)
-                break
+    # deadline_logged: dispatch() below is called repeatedly (once before
+    # the drain loop, once after each batch of completions), and each call
+    # re-checks the deadline once -- this just keeps the "stopping crawl"
+    # debug line to a single log line instead of one per dispatch() call
+    # once the deadline has passed.
+    deadline_logged = False
 
+    def dispatch(executor, in_flight: dict) -> None:
+        """Fills available concurrency slots from the queue -- pops,
+        applies the same robots.txt/already-visited pre-checks the old
+        sequential loop applied before every fetch, and submits a fetch
+        for anything that survives both. Only the network fetch itself
+        runs on a worker thread; queue/seen/visited/in_flight are only
+        ever touched from this generator's own thread (dispatch() and the
+        drain loop below both run here), so none of them need a lock."""
+        nonlocal deadline_logged
+
+        if deadline is not None and time.monotonic() >= deadline:
+            if not deadline_logged:
+                logger.debug("Wall-clock timeout reached, stopping crawl (%.0fs budget)", timeout_seconds)
+                deadline_logged = True
+            return
+
+        while (
+            queue
+            and len(in_flight) < max_concurrency
+            # in-flight fetches count toward the budget too, so a burst of
+            # dispatches doesn't launch far more fetches than max_pages
+            # could ever end up needing.
+            and (max_pages is None or len(visited_traversal) + len(in_flight) < max_pages)
+        ):
             current_url, depth, queued_as_external = queue.popleft()
 
             # robots_policy was loaded for start_url's domain -- it has
@@ -371,186 +421,207 @@ def crawl_stream(
                 # Already reached this exact URL earlier -- e.g. it was
                 # sitting in the queue when a DIFFERENT queued URL redirected
                 # to it and got marked visited first. Don't waste an HTTP
-                # request confirming what we already know.
+                # request confirming what we already know. Note: under
+                # concurrency (max_concurrency > 1), a second URL that
+                # redirects to the same destination CAN still slip past
+                # this check while the first is still in flight -- the
+                # "Already traversed" check further down catches that
+                # case instead, at the cost of one wasted duplicate fetch,
+                # never a correctness problem.
                 continue
 
             logger.debug("Visiting (depth %d): %s", depth, current_url)
+            future = executor.submit(fetch, session, current_url, delay_seconds)
+            in_flight[future] = (current_url, depth, queued_as_external)
 
-            try:
-                response = fetch(session, current_url)
-            except requests.RequestException as exc:
-                logger.warning("Failed to fetch %s: %s", current_url, exc)
-                errors.append({"url": current_url, "error": _friendly_fetch_error(current_url, exc)})
-                continue
+    try:
+        with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+            in_flight: dict = {}
+            dispatch(executor, in_flight)
 
-            # The server may have redirected us -- the final destination,
-            # not the URL we requested, is this page's identity so far.
-            final_url = normalize_url(response.url, path_specific_strip, ignore_query_parameters)
-            final_domain = urlparse(final_url).netloc
+            while in_flight:
+                done, _ = wait_futures(in_flight, return_when=FIRST_COMPLETED)
 
-            # Same-site checking happens twice: once when a link is
-            # discovered (extract_links() below only returns links matching
-            # the CURRENT page's domain, unless allow_external_links widens
-            # that), and again here, because a redirect can move us outside
-            # the crawl boundary even when the URL we REQUESTED was
-            # legitimately in scope -- e.g.
-            # realpython.com/merch -> realpython.threadless.com. The
-            # requested URL is already in `seen` (it got there before being
-            # queued), so it won't be retried.
-            page_is_external = not is_same_site(final_domain, start_domain, allow_subdomains)
+                for future in done:
+                    current_url, depth, queued_as_external = in_flight.pop(future)
 
-            if page_is_external and not allow_external_links:
-                # Default behavior, unchanged: the external destination is
-                # never recorded or expanded.
-                logger.debug("External redirect, stopping: %s -> %s", current_url, final_url)
-                continue
+                    try:
+                        response = future.result()
+                    except requests.RequestException as exc:
+                        logger.warning("Failed to fetch %s: %s", current_url, exc)
+                        errors.append({"url": current_url, "error": _friendly_fetch_error(current_url, exc)})
+                        continue
 
-            # final_url is the ONLY thing that decides whether we've already
-            # processed this page and whether we bother extracting its links.
-            # A canonical tag is a claim the PAGE makes about its preferred
-            # URL, not proof we've already fetched and expanded that other
-            # URL -- so it must never gate traversal, only the output below.
-            if final_url in visited_traversal:
-                # Already reached this exact final destination earlier -- a
-                # different requested URL or redirect chain led here too.
-                # Nothing new here -- don't record it again or re-expand it.
-                logger.debug("Already traversed: %s -> %s", current_url, final_url)
-                continue
+                    # The server may have redirected us -- the final destination,
+                    # not the URL we requested, is this page's identity so far.
+                    final_url = normalize_url(response.url, path_specific_strip, ignore_query_parameters)
+                    final_domain = urlparse(final_url).netloc
 
-            visited_traversal.add(final_url)
+                    # Same-site checking happens twice: once when a link is
+                    # discovered (extract_links() below only returns links matching
+                    # the CURRENT page's domain, unless allow_external_links widens
+                    # that), and again here, because a redirect can move us outside
+                    # the crawl boundary even when the URL we REQUESTED was
+                    # legitimately in scope -- e.g.
+                    # realpython.com/merch -> realpython.threadless.com. The
+                    # requested URL is already in `seen` (it got there before being
+                    # queued), so it won't be retried.
+                    page_is_external = not is_same_site(final_domain, start_domain, allow_subdomains)
 
-            # Both the requested URL and the final destination now count as
-            # seen -- a future link matching EITHER form should be skipped
-            # rather than re-queued and re-fetched as if it were new.
-            seen.add(current_url)
-            seen.add(final_url)
+                    if page_is_external and not allow_external_links:
+                        # Default behavior, unchanged: the external destination is
+                        # never recorded or expanded.
+                        logger.debug("External redirect, stopping: %s -> %s", current_url, final_url)
+                        continue
 
-            if page_is_external:
-                # allow_external_links=True and we got here: record it as a
-                # discovered URL, but as a leaf -- never parsed for its own
-                # canonical tag or links, never expanded. One HTTP request
-                # (the one that just ran) is the full cost of an external
-                # URL, same as Firecrawl's "scraped once without further
-                # link discovery."
-                if final_url not in output_seen:
-                    output_seen.add(final_url)
-                    discovered_output.append(final_url)
-                    yield {"event": "url_discovered", "url": final_url, "count": len(discovered_output)}
-                continue
+                    # final_url is the ONLY thing that decides whether we've already
+                    # processed this page and whether we bother extracting its links.
+                    # A canonical tag is a claim the PAGE makes about its preferred
+                    # URL, not proof we've already fetched and expanded that other
+                    # URL -- so it must never gate traversal, only the output below.
+                    if final_url in visited_traversal:
+                        # Already reached this exact final destination earlier -- a
+                        # different requested URL or redirect chain led here too.
+                        # Nothing new here -- don't record it again or re-expand it.
+                        logger.debug("Already traversed: %s -> %s", current_url, final_url)
+                        continue
 
-            # A non-HTML response (PDF, image, ...) has no canonical tag and
-            # no <a> links to extract -- feeding it to the HTML parser would
-            # just waste cycles finding nothing. A MISSING content-type
-            # header is treated as HTML (not as a reason to skip): unlike
-            # content_extraction's single-resource contract, getting this
-            # wrong here only means we attempt a parse that finds nothing,
-            # not that we drop a page we should have discovered.
-            content_type = response.headers.get("content-type", "")
-            is_html_page = content_type == "" or "text/html" in content_type.lower()
+                    visited_traversal.add(final_url)
 
-            if not is_html_page:
-                logger.debug("Non-HTML content-type, skipping parse: %s (%s)", final_url, content_type)
+                    # Both the requested URL and the final destination now count as
+                    # seen -- a future link matching EITHER form should be skipped
+                    # rather than re-queued and re-fetched as if it were new.
+                    seen.add(current_url)
+                    seen.add(final_url)
 
-            # page_html is what canonical/link extraction below actually
-            # reads -- defaults to the raw HTTP HTML, but gets replaced
-            # with a rendered version when this page looks like an
-            # unrendered SPA shell, we haven't hit this crawl's render
-            # cap, and a browser is available (or can still be launched).
-            # A rendered page is treated as a full replacement, not merged
-            # with the raw HTML -- the rendered DOM already contains
-            # whatever the raw HTML had, plus whatever JS added.
-            page_html = response.text
+                    if page_is_external:
+                        # allow_external_links=True and we got here: record it as a
+                        # discovered URL, but as a leaf -- never parsed for its own
+                        # canonical tag or links, never expanded. One HTTP request
+                        # (the one that just ran) is the full cost of an external
+                        # URL, same as Firecrawl's "scraped once without further
+                        # link discovery."
+                        if final_url not in output_seen:
+                            output_seen.add(final_url)
+                            discovered_output.append(final_url)
+                            yield {"event": "url_discovered", "url": final_url, "count": len(discovered_output)}
+                        continue
 
-            if (
-                is_html_page
-                and not browser_unavailable
-                and browser_render_count < MAX_BROWSER_RENDERS_PER_CRAWL
-                and should_render_with_browser(response.text)
-            ):
-                try:
-                    if browser is None:
-                        playwright_cm = sync_playwright().start()
-                        browser = playwright_cm.chromium.launch(headless=True)
+                    # A non-HTML response (PDF, image, ...) has no canonical tag and
+                    # no <a> links to extract -- feeding it to the HTML parser would
+                    # just waste cycles finding nothing. A MISSING content-type
+                    # header is treated as HTML (not as a reason to skip): unlike
+                    # content_extraction's single-resource contract, getting this
+                    # wrong here only means we attempt a parse that finds nothing,
+                    # not that we drop a page we should have discovered.
+                    content_type = response.headers.get("content-type", "")
+                    is_html_page = content_type == "" or "text/html" in content_type.lower()
 
-                    page_html = render_page_html(browser, response.url)
-                    browser_render_count += 1
-                    logger.debug("Rendered with browser (%d/%d): %s",
-                                 browser_render_count, MAX_BROWSER_RENDERS_PER_CRAWL, final_url)
-                except Exception as exc:
-                    logger.warning("Browser render failed for %s: %s", final_url, exc)
-                    if browser is None:
-                        # The LAUNCH itself failed (missing Chromium
-                        # install, etc.) -- give up on browser rendering
-                        # for the rest of this crawl rather than retrying
-                        # (and re-failing) on every subsequent page.
-                        browser_unavailable = True
-                    # page_html already defaults to the raw HTML above --
-                    # this page's discovery still proceeds on that basis.
+                    if not is_html_page:
+                        logger.debug("Non-HTML content-type, skipping parse: %s (%s)", final_url, content_type)
 
-            # The preferred URL to REPORT for this page -- starts as
-            # final_url, but a same-site canonical (independent of any HTTP
-            # redirect) can override it. E.g. /articles/page/2/ and
-            # /articles/page/3/ both traverse separately, but if both declare
-            # canonical=/articles/, they should all report as one output URL.
-            output_url = final_url
+                    # page_html is what canonical/link extraction below actually
+                    # reads -- defaults to the raw HTTP HTML, but gets replaced
+                    # with a rendered version when this page looks like an
+                    # unrendered SPA shell, we haven't hit this crawl's render
+                    # cap, and a browser is available (or can still be launched).
+                    # A rendered page is treated as a full replacement, not merged
+                    # with the raw HTML -- the rendered DOM already contains
+                    # whatever the raw HTML had, plus whatever JS added.
+                    page_html = response.text
 
-            canonical_url = extract_canonical(page_html, response.url) if is_html_page else None
+                    if (
+                        is_html_page
+                        and not browser_unavailable
+                        and browser_render_count < MAX_BROWSER_RENDERS_PER_CRAWL
+                        and should_render_with_browser(response.text)
+                    ):
+                        try:
+                            if browser is None:
+                                playwright_cm = sync_playwright().start()
+                                browser = playwright_cm.chromium.launch(headless=True)
 
-            if canonical_url:
-                canonical_url = normalize_url(canonical_url, path_specific_strip, ignore_query_parameters)
-                canonical_domain = urlparse(canonical_url).netloc
+                            page_html = render_page_html(browser, response.url)
+                            browser_render_count += 1
+                            logger.debug("Rendered with browser (%d/%d): %s",
+                                         browser_render_count, MAX_BROWSER_RENDERS_PER_CRAWL, final_url)
+                        except Exception as exc:
+                            logger.warning("Browser render failed for %s: %s", final_url, exc)
+                            if browser is None:
+                                # The LAUNCH itself failed (missing Chromium
+                                # install, etc.) -- give up on browser rendering
+                                # for the rest of this crawl rather than retrying
+                                # (and re-failing) on every subsequent page.
+                                browser_unavailable = True
+                            # page_html already defaults to the raw HTML above --
+                            # this page's discovery still proceeds on that basis.
 
-                logger.debug("Canonical: %s -> %s", final_url, canonical_url)
+                    # The preferred URL to REPORT for this page -- starts as
+                    # final_url, but a same-site canonical (independent of any HTTP
+                    # redirect) can override it. E.g. /articles/page/2/ and
+                    # /articles/page/3/ both traverse separately, but if both declare
+                    # canonical=/articles/, they should all report as one output URL.
+                    output_url = final_url
 
-                if is_same_site(canonical_domain, start_domain, allow_subdomains):
-                    output_url = canonical_url
+                    canonical_url = extract_canonical(page_html, response.url) if is_html_page else None
 
-            if output_url not in output_seen:
-                output_seen.add(output_url)
-                discovered_output.append(output_url)
-                yield {"event": "url_discovered", "url": output_url, "count": len(discovered_output)}
+                    if canonical_url:
+                        canonical_url = normalize_url(canonical_url, path_specific_strip, ignore_query_parameters)
+                        canonical_domain = urlparse(canonical_url).netloc
 
-            # Links found on this page are one hop further out than this
-            # page itself -- don't even queue them if that would exceed
-            # max_depth, same as we already skip already-seen links.
-            if max_depth is not None and depth >= max_depth:
-                continue
+                        logger.debug("Canonical: %s -> %s", final_url, canonical_url)
 
-            if not is_html_page:
-                continue
+                        if is_same_site(canonical_domain, start_domain, allow_subdomains):
+                            output_url = canonical_url
 
-            # Always extract links from the page we actually just fetched,
-            # regardless of whether output_url was already seen -- /articles/
-            # and /articles/page/2/ share an output URL but do NOT share
-            # content. Gating this on output_seen would silently stop the
-            # crawl from ever reaching /articles/page/3/ and beyond.
-            same_site_links, external_links = extract_links(
-                page_html,
-                response.url,
-                path_specific_strip,
-                ignore_query_parameters,
-                allow_subdomains,
-                allow_external_links,
-            )
+                    if output_url not in output_seen:
+                        output_seen.add(output_url)
+                        discovered_output.append(output_url)
+                        yield {"event": "url_discovered", "url": output_url, "count": len(discovered_output)}
 
-            for link in same_site_links:
-                if link in seen:
-                    continue
-                if not in_scope(link):
-                    continue
+                    # Links found on this page are one hop further out than this
+                    # page itself -- don't even queue them if that would exceed
+                    # max_depth, same as we already skip already-seen links.
+                    if max_depth is not None and depth >= max_depth:
+                        continue
 
-                seen.add(link)
-                queue.append((link, depth + 1, False))
+                    if not is_html_page:
+                        continue
 
-            for link in external_links:
-                # include/exclude/restrict_to_start_path describe THIS
-                # site's own path structure -- they say nothing about a
-                # different domain's paths, so they're never applied here.
-                if link in seen:
-                    continue
+                    # Always extract links from the page we actually just fetched,
+                    # regardless of whether output_url was already seen -- /articles/
+                    # and /articles/page/2/ share an output URL but do NOT share
+                    # content. Gating this on output_seen would silently stop the
+                    # crawl from ever reaching /articles/page/3/ and beyond.
+                    same_site_links, external_links = extract_links(
+                        page_html,
+                        response.url,
+                        path_specific_strip,
+                        ignore_query_parameters,
+                        allow_subdomains,
+                        allow_external_links,
+                    )
 
-                seen.add(link)
-                queue.append((link, depth + 1, True))
+                    for link in same_site_links:
+                        if link in seen:
+                            continue
+                        if not in_scope(link):
+                            continue
+
+                        seen.add(link)
+                        queue.append((link, depth + 1, False))
+
+                    for link in external_links:
+                        # include/exclude/restrict_to_start_path describe THIS
+                        # site's own path structure -- they say nothing about a
+                        # different domain's paths, so they're never applied here.
+                        if link in seen:
+                            continue
+
+                        seen.add(link)
+                        queue.append((link, depth + 1, True))
+
+                dispatch(executor, in_flight)
     finally:
         if browser is not None:
             browser.close()
@@ -581,6 +652,8 @@ def crawl(
     allow_external_links: bool = False,
     ignore_query_parameters: bool = False,
     ignore_robots_txt: bool = False,
+    max_concurrency: int = 1,
+    delay_seconds: float | None = None,
 ) -> dict:
     """Non-streaming convenience wrapper, same contract this had before
     streaming existed -- exhausts crawl_stream() and returns just its
@@ -599,6 +672,8 @@ def crawl(
         allow_external_links=allow_external_links,
         ignore_query_parameters=ignore_query_parameters,
         ignore_robots_txt=ignore_robots_txt,
+        max_concurrency=max_concurrency,
+        delay_seconds=delay_seconds,
     ):
         if event["event"] == "complete":
             return event["result"]
@@ -618,6 +693,8 @@ def discover_urls_stream(
     allow_external_links: bool = False,
     ignore_query_parameters: bool = False,
     ignore_robots_txt: bool = False,
+    max_concurrency: int = 1,
+    delay_seconds: float | None = None,
 ):
     """The feature-level streaming entry point -- crawl_stream() is the
     traversal engine; this is the contract + safety boundary around it,
@@ -654,6 +731,8 @@ def discover_urls_stream(
             allow_external_links=allow_external_links,
             ignore_query_parameters=ignore_query_parameters,
             ignore_robots_txt=ignore_robots_txt,
+            max_concurrency=max_concurrency,
+            delay_seconds=delay_seconds,
         ):
             if event["event"] == "url_discovered":
                 yield event
@@ -709,6 +788,8 @@ def discover_urls(
     allow_external_links: bool = False,
     ignore_query_parameters: bool = False,
     ignore_robots_txt: bool = False,
+    max_concurrency: int = 1,
+    delay_seconds: float | None = None,
 ) -> dict:
     """Non-streaming convenience wrapper, same contract this had before
     streaming existed -- exhausts discover_urls_stream() and returns just
@@ -727,6 +808,8 @@ def discover_urls(
         allow_external_links=allow_external_links,
         ignore_query_parameters=ignore_query_parameters,
         ignore_robots_txt=ignore_robots_txt,
+        max_concurrency=max_concurrency,
+        delay_seconds=delay_seconds,
     ):
         if event["event"] == "complete":
             return event["result"]

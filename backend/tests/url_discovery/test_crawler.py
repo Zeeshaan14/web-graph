@@ -5,6 +5,7 @@
 # boundary (Session.get / time.sleep), so the real traversal/queue/dedup
 # logic all runs for real.
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1358,3 +1359,146 @@ class TestIgnoreRobotsTxt:
         )
 
         assert "https://example.com/private/" in result["urls"]
+
+
+class TestConcurrentDiscovery:
+    """Uses a lock-guarded in-flight counter (with a real, short
+    threading.Event().wait() inside the fake network call -- NOT
+    time.sleep(), since every test here patches
+    url_discovery.fetcher.time.sleep to skip the crawler's own pacing,
+    and time.sleep is one shared function on the time module, so that
+    patch would silently neutralize a plain time.sleep() call anywhere
+    in the process, this fake included) to prove genuine overlap, not
+    just correct end results. A result-only test would pass even if
+    max_concurrency silently did nothing, since the sequential code path
+    already produces correct output -- these confirm fetches actually
+    ran in parallel."""
+
+    def _tracking_fake_get(self, pages, in_flight_holder):
+        lock = threading.Lock()
+
+        def fake_get(url, timeout=10):
+            if url in ("https://example.com/robots.txt", "https://example.com/sitemap.xml"):
+                return make_not_found_response(url)
+
+            with lock:
+                in_flight_holder["current"] += 1
+                in_flight_holder["max"] = max(in_flight_holder["max"], in_flight_holder["current"])
+
+            # NOT time.sleep(): every test in this file patches
+            # url_discovery.fetcher.time.sleep to skip the crawler's own
+            # pacing -- but time.sleep is a single shared function on the
+            # (singleton) time module, so patching it through ANY import
+            # path replaces it everywhere in the process, including a
+            # plain time.sleep() called right here. threading.Event().wait()
+            # is a different primitive entirely, unaffected by that patch,
+            # so it's what actually creates a real overlap window to
+            # detect below.
+            threading.Event().wait(0.05)
+
+            with lock:
+                in_flight_holder["current"] -= 1
+
+            final_url, html = pages[url]
+            response = MagicMock(status_code=200, url=final_url, text=html, headers={})
+            response.raise_for_status.side_effect = None
+            return response
+
+        return fake_get
+
+    def test_max_concurrency_default_is_strictly_sequential(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/a/">A</a><a href="/b/">B</a><a href="/c/">C</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+            "https://example.com/b/": ("https://example.com/b/", "<html>b</html>"),
+            "https://example.com/c/": ("https://example.com/c/", "<html>c</html>"),
+        }
+        in_flight = {"current": 0, "max": 0}
+        fake_get = self._tracking_fake_get(pages, in_flight)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = crawl("https://example.com/", max_pages=10, max_depth=1)
+
+        assert in_flight["max"] == 1
+        assert len(result["urls"]) == 4
+
+    def test_max_concurrency_above_one_genuinely_overlaps_fetches(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/a/">A</a><a href="/b/">B</a><a href="/c/">C</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+            "https://example.com/b/": ("https://example.com/b/", "<html>b</html>"),
+            "https://example.com/c/": ("https://example.com/c/", "<html>c</html>"),
+        }
+        in_flight = {"current": 0, "max": 0}
+        fake_get = self._tracking_fake_get(pages, in_flight)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            result = crawl("https://example.com/", max_pages=10, max_depth=1, max_concurrency=3)
+
+        # Lenient bound (>=2, not ==3) -- proves real overlap without the
+        # test depending on exact thread-scheduling timing.
+        assert in_flight["max"] >= 2
+        assert len(result["urls"]) == 4
+
+    def test_concurrent_and_sequential_crawls_discover_the_same_urls(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/a/">A</a><a href="/b/">B</a><a href="/c/">C</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", '<a href="/d/">D</a>'),
+            "https://example.com/b/": ("https://example.com/b/", "<html>b</html>"),
+            "https://example.com/c/": ("https://example.com/c/", "<html>c</html>"),
+            "https://example.com/d/": ("https://example.com/d/", "<html>d</html>"),
+        }
+
+        sequential = run(dict(pages), start_url="https://example.com/", max_pages=10, max_depth=2)
+        concurrent_result = run(
+            dict(pages), start_url="https://example.com/", max_pages=10, max_depth=2,
+            max_concurrency=4,
+        )
+
+        assert set(sequential["urls"]) == set(concurrent_result["urls"])
+        assert sequential["pages_traversed"] == concurrent_result["pages_traversed"]
+
+    def test_delay_seconds_forces_max_concurrency_back_to_one(self):
+        pages = {
+            "https://example.com/": (
+                "https://example.com/",
+                '<a href="/a/">A</a><a href="/b/">B</a>',
+            ),
+            "https://example.com/a/": ("https://example.com/a/", "<html>a</html>"),
+            "https://example.com/b/": ("https://example.com/b/", "<html>b</html>"),
+        }
+        in_flight = {"current": 0, "max": 0}
+        fake_get = self._tracking_fake_get(pages, in_flight)
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=fake_get), \
+             patch("url_discovery.fetcher.time.sleep"):
+            crawl(
+                "https://example.com/", max_pages=10, max_depth=1,
+                max_concurrency=5, delay_seconds=0.01,
+            )
+
+        assert in_flight["max"] == 1
+
+    def test_delay_seconds_overrides_the_default_pacing_gap(self):
+        # robots.txt/sitemap.xml are fetched outside the queue-driven
+        # dispatch loop and don't take delay_seconds -- only the actual
+        # page fetch does, so this checks that call specifically rather
+        # than asserting every sleep call used the custom delay.
+        pages = {"https://example.com/": ("https://example.com/", "<html>home</html>")}
+
+        with patch("url_discovery.fetcher.requests.Session.get", side_effect=make_fake_get(pages)), \
+             patch("url_discovery.fetcher.time.sleep") as mock_sleep:
+            crawl("https://example.com/", max_pages=10, max_depth=0, delay_seconds=2.5)
+
+        assert any(call.args == (2.5,) for call in mock_sleep.call_args_list)

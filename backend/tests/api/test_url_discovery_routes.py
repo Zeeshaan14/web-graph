@@ -42,6 +42,8 @@ DEFAULT_SCOPE_KWARGS = {
     "allow_external_links": False,
     "ignore_query_parameters": False,
     "ignore_robots_txt": False,
+    "max_concurrency": 1,
+    "delay_seconds": None,
 }
 
 
@@ -256,6 +258,62 @@ class TestScopeControlOptions:
             response = client.post(
                 "/discover-urls",
                 json={"url": "https://example.com/", "exclude_paths": ["(unclosed"]},
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422
+
+
+class TestConcurrencyOptions:
+    def test_max_concurrency_and_delay_seconds_are_forwarded(self):
+        with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
+            client.post(
+                "/discover-urls",
+                json={"url": "https://example.com/", "max_concurrency": 5, "delay_seconds": 2.5},
+            )
+
+        kwargs = mock_discover.call_args.kwargs
+        assert kwargs["max_concurrency"] == 5
+        assert kwargs["delay_seconds"] == 2.5
+
+    def test_max_concurrency_defaults_to_one(self):
+        with patch("api.routes.url_discovery.discover_urls", return_value=SUCCESS_RESULT) as mock_discover:
+            client.post("/discover-urls", json={"url": "https://example.com/"})
+
+        assert mock_discover.call_args.kwargs["max_concurrency"] == 1
+        assert mock_discover.call_args.kwargs["delay_seconds"] is None
+
+    def test_max_concurrency_above_the_cap_is_rejected(self):
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls", json={"url": "https://example.com/", "max_concurrency": 11}
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422
+
+    def test_max_concurrency_below_one_is_rejected(self):
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls", json={"url": "https://example.com/", "max_concurrency": 0}
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422
+
+    def test_negative_delay_seconds_is_rejected(self):
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls", json={"url": "https://example.com/", "delay_seconds": -1}
+            )
+
+        mock_discover.assert_not_called()
+        assert response.status_code == 422
+
+    def test_delay_seconds_above_the_cap_is_rejected(self):
+        with patch("api.routes.url_discovery.discover_urls") as mock_discover:
+            response = client.post(
+                "/discover-urls", json={"url": "https://example.com/", "delay_seconds": 61}
             )
 
         mock_discover.assert_not_called()

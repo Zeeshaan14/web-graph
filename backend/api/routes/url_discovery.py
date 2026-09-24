@@ -34,5 +34,7 @@ def discover_urls_route(request: DiscoverRequest) -> DiscoverResponse:
         allow_external_links=request.allow_external_links,
         ignore_query_parameters=request.ignore_query_parameters,
         ignore_robots_txt=request.ignore_robots_txt,
+        max_concurrency=request.max_concurrency,
+        delay_seconds=request.delay_seconds,
     )
     return DiscoverResponse(**result)

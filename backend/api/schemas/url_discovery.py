@@ -97,6 +97,18 @@ class DiscoverRequest(BaseModel):
         default=False,
         description="Crawl every same-site URL regardless of robots.txt. Off by default -- this crawler obeys robots.txt unless a caller explicitly opts out.",
     )
+    max_concurrency: int = Field(
+        default=1, ge=1, le=10,
+        description=(
+            "How many pages to fetch at once instead of one at a time. Capped at 10 here "
+            "-- same reasoning as MAX_CONCURRENT_EXTRACTIONS in website_processing/pipeline.py: "
+            "a small, fixed ceiling on how aggressively a public endpoint hits someone else's site."
+        ),
+    )
+    delay_seconds: float | None = Field(
+        default=None, ge=0.0, le=60.0,
+        description="Explicit pause between fetches, overriding the crawler's default pacing. Forces max_concurrency back to 1 -- see url_discovery.crawler.crawl_stream().",
+    )
 
     _validate_paths = field_validator("include_paths", "exclude_paths")(_validate_path_patterns)
 

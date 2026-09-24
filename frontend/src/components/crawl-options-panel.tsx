@@ -76,6 +76,53 @@ function PathList({
   );
 }
 
+function NumberField({
+  label,
+  description,
+  value,
+  onChange,
+  min,
+  max,
+  step,
+  suffix,
+  placeholder,
+  disabled,
+}: {
+  label: string;
+  description: string;
+  value: number | "";
+  onChange: (value: number | null) => void;
+  min: number;
+  max: number;
+  step?: number;
+  suffix?: string;
+  placeholder?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2">
+      <div className="flex flex-col">
+        <span className={`text-sm ${disabled ? "text-muted-foreground" : ""}`}>{label}</span>
+        <span className="text-xs text-muted-foreground">{description}</span>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
+        <Input
+          type="number"
+          min={min}
+          max={max}
+          step={step ?? 1}
+          value={value}
+          placeholder={placeholder}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
+          className="h-8 w-20 text-right"
+        />
+        {suffix && <span className="text-xs text-muted-foreground">{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
 function ScopeToggle({
   label,
   description,
@@ -181,6 +228,33 @@ export function CrawlOptionsPanel({
               description="Crawl every same-site page regardless of robots.txt. Only use this on sites you own or have permission to crawl."
               checked={options.ignoreRobotsTxt}
               onChange={(v) => set("ignoreRobotsTxt", v)}
+            />
+          </div>
+
+          <div className="flex flex-col divide-y border-t pt-1">
+            <NumberField
+              label="Max concurrency"
+              description={
+                options.delaySeconds !== null
+                  ? "Forced to 1 while a delay is set below."
+                  : "How many pages to fetch at once, instead of one at a time."
+              }
+              value={options.maxConcurrency}
+              onChange={(v) => set("maxConcurrency", Math.min(10, Math.max(1, v ?? 1)))}
+              min={1}
+              max={10}
+              disabled={options.delaySeconds !== null}
+            />
+            <NumberField
+              label="Delay between fetches"
+              description="Pause this many seconds between fetches (forces concurrency to 1). Leave blank for the default pacing."
+              value={options.delaySeconds ?? ""}
+              onChange={(v) => set("delaySeconds", v)}
+              min={0}
+              max={60}
+              step={0.5}
+              suffix="sec"
+              placeholder="default"
             />
           </div>
 

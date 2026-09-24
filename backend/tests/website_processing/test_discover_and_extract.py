@@ -148,7 +148,7 @@ class TestOrchestration:
             include_paths=None, exclude_paths=None, regex_on_full_url=False,
             restrict_to_start_path=False, allow_subdomains=False,
             allow_external_links=False, ignore_query_parameters=False,
-            ignore_robots_txt=False,
+            ignore_robots_txt=False, max_concurrency=1, delay_seconds=None,
         )
 
     def test_discover_urls_receives_the_new_scope_control_options(self):
@@ -165,6 +165,8 @@ class TestOrchestration:
                 allow_external_links=True,
                 ignore_query_parameters=True,
                 ignore_robots_txt=True,
+                max_concurrency=5,
+                delay_seconds=2.0,
             )
 
         mock_discover.assert_called_once_with(
@@ -172,7 +174,7 @@ class TestOrchestration:
             include_paths=["^/blog/"], exclude_paths=["draft"], regex_on_full_url=True,
             restrict_to_start_path=True, allow_subdomains=True,
             allow_external_links=True, ignore_query_parameters=True,
-            ignore_robots_txt=True,
+            ignore_robots_txt=True, max_concurrency=5, delay_seconds=2.0,
         )
 
     def test_discovery_field_carries_the_raw_discovery_result_verbatim(self):

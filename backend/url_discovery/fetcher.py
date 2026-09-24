@@ -64,12 +64,17 @@ def _parse_retry_after(value: str | None) -> float | None:
     return max((retry_at - datetime.now(timezone.utc)).total_seconds(), 0)
 
 
-def fetch(session: requests.Session, url: str) -> requests.Response:
+def fetch(session: requests.Session, url: str, delay_seconds: float | None = None) -> requests.Response:
     """One polite GET: a controlled retry on 429 (Retry-After if present,
     otherwise a fallback backoff, then exactly one retry), and a pacing
     delay after every attempt regardless of outcome. Raises
     requests.RequestException if it's still failing after the retry --
-    the caller skips and moves on, no further retries here."""
+    the caller skips and moves on, no further retries here.
+
+    delay_seconds overrides the default REQUEST_DELAY_SECONDS pacing gap
+    -- None (the default) keeps the standard pacing; a caller running
+    fetch() concurrently across several worker threads passes its own
+    per-call delay this way rather than mutating the module constant."""
     try:
         response = session.get(url, timeout=10)
 
@@ -89,4 +94,4 @@ def fetch(session: requests.Session, url: str) -> requests.Response:
     finally:
         # Pace every request attempt, success or failure -- this is
         # about the server's rate limit, not about our outcome.
-        time.sleep(REQUEST_DELAY_SECONDS)
+        time.sleep(REQUEST_DELAY_SECONDS if delay_seconds is None else delay_seconds)
